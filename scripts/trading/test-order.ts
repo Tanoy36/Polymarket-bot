@@ -8,7 +8,14 @@
  *   POLY_PRIVKEY=0x... npx tsx scripts/trading/test-order.ts
  */
 
-import { TradingService, RateLimiter, createUnifiedCache } from '../../src/index.js';
+import {
+  TradingService,
+  MarketService,
+  GammaApiClient,
+  DataApiClient,
+  RateLimiter,
+  createUnifiedCache,
+} from '../../src/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,11 +23,25 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Read private key from dashboard-api .env
-const envPath = path.resolve(__dirname, '../../earning-engine/dashboard-api/.env');
-const envContent = fs.readFileSync(envPath, 'utf8');
-const match = envContent.match(/^PRIVATE_KEY=(.+)$/m);
-const PRIVATE_KEY = process.env.POLY_PRIVKEY || (match ? match[1].trim() : '');
+// Private key: POLY_PRIVKEY / POLYMARKET_PRIVATE_KEY env var, falling back to
+// the repo-root .env. (The old hardcoded ../../earning-engine/... path does not
+// exist in this repo and made the script throw before it could run.)
+function readKeyFromEnvFile(): string {
+  for (const p of [
+    path.resolve(__dirname, '../../.env'),
+    path.resolve(__dirname, '../../earning-engine/dashboard-api/.env'),
+  ]) {
+    if (!fs.existsSync(p)) continue;
+    const m = fs
+      .readFileSync(p, 'utf8')
+      .match(/^(?:POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=(.+)$/m);
+    if (m) return m[1].trim();
+  }
+  return '';
+}
+
+const PRIVATE_KEY =
+  process.env.POLY_PRIVKEY || process.env.POLYMARKET_PRIVATE_KEY || readKeyFromEnvFile();
 
 // 使用一个活跃的市场进行测试 - NVIDIA market cap
 const TEST_MARKET = {
@@ -62,10 +83,17 @@ async function main() {
   console.log(`Allowance: ${allowance === 'unlimited' || parseFloat(allowance) / 1e6 > 1e12 ? 'Unlimited' : (parseFloat(allowance) / 1e6).toFixed(2)}`);
   console.log('');
 
-  // 获取当前市场价格
-  const orderbook = await tradingService.getProcessedOrderbook(TEST_MARKET.yesTokenId);
-  const bestBid = orderbook.bids[0]?.price || 0;
-  const bestAsk = orderbook.asks[0]?.price || 1;
+  // 获取当前市场价格 (orderbook 数据在 MarketService 上, 按 conditionId 查询)
+  const marketService = new MarketService(
+    new GammaApiClient(rateLimiter, cache),
+    new DataApiClient(rateLimiter, cache),
+    rateLimiter,
+    cache,
+    { chainId: 137 }
+  );
+  const orderbook = await marketService.getProcessedOrderbook(TEST_MARKET.conditionId);
+  const bestBid = orderbook.yes.bid || 0;
+  const bestAsk = orderbook.yes.ask || 1;
   console.log(`Current YES price: ${bestBid.toFixed(3)} / ${bestAsk.toFixed(3)}`);
   console.log('');
 
@@ -84,7 +112,7 @@ async function main() {
   console.log(`Expected cost: $${(gtcSize * gtcBuyPrice).toFixed(2)}`);
 
   try {
-    const gtcResult = await tradingService.createOrder({
+    const gtcResult = await tradingService.createLimitOrder({
       tokenId: TEST_MARKET.yesTokenId,
       side: 'BUY',
       price: gtcBuyPrice,

@@ -1,7 +1,9 @@
 /**
  * TradingService
  *
- * Trading service using official @polymarket/clob-client.
+ * Trading service using official @polymarket/clob-client-v2 (Polymarket CLOB V2, live since
+ * April 28, 2026). The legacy @polymarket/clob-client (V1) package no longer works against
+ * production - see https://docs.polymarket.com/v2-migration.
  *
  * Provides:
  * - Order creation (limit, market)
@@ -20,7 +22,7 @@ import {
   type OpenOrder,
   type Trade as ClobTrade,
   type TickSize,
-} from '@polymarket/clob-client';
+} from '@polymarket/clob-client-v2';
 
 import { Wallet } from 'ethers';
 import { RateLimiter, ApiType } from '../core/rate-limiter.js';
@@ -33,7 +35,7 @@ import type { Side, OrderType } from '../core/types.js';
 export const POLYGON_MAINNET = 137;
 export const POLYGON_AMOY = 80002;
 
-// CLOB Host
+// CLOB Host (unchanged in V2 - production traffic now runs V2 at the same host)
 const CLOB_HOST = 'https://clob.polymarket.com';
 
 // ============================================================================
@@ -52,6 +54,23 @@ export const MIN_ORDER_VALUE_USDC = 1;
 
 /** Minimum order size in shares */
 export const MIN_ORDER_SIZE_SHARES = 5;
+
+/**
+ * Signature type used to sign orders.
+ *
+ * - 0 = EOA: the signer trades directly with its own wallet (no funder wallet).
+ *   This is the historical default for this bot and remains the default here -
+ *   if you don't set FUNDER_ADDRESS/SIGNATURE_TYPE in .env, behavior is 100%
+ *   unchanged from previous versions.
+ * - 1 = POLY_PROXY: legacy Polymarket proxy wallet (Magic Link / email login)
+ * - 2 = GNOSIS_SAFE: legacy Safe wallet (created with MetaMask/Rabby on polymarket.com)
+ * - 3 = POLY_1271 / Deposit Wallet: current default smart wallet for accounts
+ *   created on or after May 4, 2026. Requires FUNDER_ADDRESS to be set to the
+ *   Deposit Wallet address shown in your Polymarket profile.
+ *
+ * @see https://docs.polymarket.com/trading/wallets-auth
+ */
+export type PolymarketSignatureType = 0 | 1 | 2 | 3;
 
 // ============================================================================
 // Types
@@ -74,6 +93,26 @@ export interface TradingServiceConfig {
   chainId?: number;
   /** Pre-generated API credentials (optional) */
   credentials?: ApiCredentials;
+  /**
+   * Address that funds/holds the trade (Deposit Wallet / Proxy / Safe address).
+   * Optional - if omitted, the signer trades directly (signatureType 0, EOA),
+   * exactly like every previous version of this bot. Only set this if your
+   * Polymarket account wallet is different from the signer's own address
+   * (e.g. you log in via email/Magic Link, or use a Deposit Wallet).
+   * Sourced from env var FUNDER_ADDRESS.
+   */
+  funderAddress?: string;
+  /**
+   * Signature type matching funderAddress's wallet type. Only meaningful when
+   * funderAddress is set. Sourced from env var SIGNATURE_TYPE (defaults to 0).
+   */
+  signatureType?: PolymarketSignatureType;
+  /**
+   * Optional builder code (V2 builder attribution). Replaces the old
+   * POLY_BUILDER_* HMAC header flow. Sourced from env var POLY_BUILDER_CODE.
+   * Purely additive - omit for identical behavior to previous versions.
+   */
+  builderCode?: string;
 }
 
 // Order types
@@ -84,6 +123,8 @@ export interface LimitOrderParams {
   size: number;
   orderType?: 'GTC' | 'GTD';
   expiration?: number;
+  /** Optional per-order builder code override (V2). */
+  builderCode?: string;
 }
 
 export interface MarketOrderParams {
@@ -92,6 +133,13 @@ export interface MarketOrderParams {
   amount: number;
   price?: number;
   orderType?: 'FOK' | 'FAK';
+  /** Optional per-order builder code override (V2). */
+  builderCode?: string;
+  /**
+   * Optional wallet USDC/pUSD balance so the V2 SDK can compute fee-adjusted
+   * fill amounts on market BUY orders. Purely additive/optional.
+   */
+  userUSDCBalance?: number;
 }
 
 export interface Order {
@@ -161,6 +209,9 @@ export class TradingService {
   private wallet: Wallet;
   private chainId: Chain;
   private credentials: ApiCredentials | null = null;
+  private funderAddress?: string;
+  private signatureType: PolymarketSignatureType;
+  private builderCode?: string;
   private initialized = false;
   private tickSizeCache: Map<string, string> = new Map();
   private negRiskCache: Map<string, boolean> = new Map();
@@ -173,6 +224,11 @@ export class TradingService {
     this.wallet = new Wallet(config.privateKey);
     this.chainId = (config.chainId || POLYGON_MAINNET) as Chain;
     this.credentials = config.credentials || null;
+    // Additive: only used if explicitly configured. Omitting these keeps the
+    // exact previous behavior (signer trades directly, signatureType 0).
+    this.funderAddress = config.funderAddress;
+    this.signatureType = config.signatureType ?? 0;
+    this.builderCode = config.builderCode;
   }
 
   // ============================================================================
@@ -182,12 +238,19 @@ export class TradingService {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    // Create CLOB client with L1 auth (wallet)
-    this.clobClient = new ClobClient(CLOB_HOST, this.chainId, this.wallet);
+    // Create CLOB client with L1 auth (wallet) - V2 options-object constructor.
+    this.clobClient = new ClobClient({
+      host: CLOB_HOST,
+      chain: this.chainId,
+      signer: this.wallet,
+      ...(this.funderAddress ? { funderAddress: this.funderAddress, signatureType: this.signatureType } : {}),
+      ...(this.builderCode ? { builderConfig: { builderCode: this.builderCode } } : {}),
+    });
 
     // Get or create API credentials
     // We use derive-first strategy (opposite of official createOrDeriveApiKey)
     // because most users already have a key, avoiding unnecessary 400 error logs.
+    // Note: L1/L2 auth is unchanged in CLOB V2 - existing API keys keep working.
     if (!this.credentials) {
       const creds = await this.deriveOrCreateApiKey();
       this.credentials = {
@@ -198,16 +261,18 @@ export class TradingService {
     }
 
     // Re-initialize with L2 auth (credentials)
-    this.clobClient = new ClobClient(
-      CLOB_HOST,
-      this.chainId,
-      this.wallet,
-      {
+    this.clobClient = new ClobClient({
+      host: CLOB_HOST,
+      chain: this.chainId,
+      signer: this.wallet,
+      creds: {
         key: this.credentials.key,
         secret: this.credentials.secret,
         passphrase: this.credentials.passphrase,
-      }
-    );
+      },
+      ...(this.funderAddress ? { funderAddress: this.funderAddress, signatureType: this.signatureType } : {}),
+      ...(this.builderCode ? { builderConfig: { builderCode: this.builderCode } } : {}),
+    });
 
     this.initialized = true;
   }
@@ -286,6 +351,10 @@ export class TradingService {
    * - Minimum value: $1 USDC (MIN_ORDER_VALUE_USDC)
    *
    * Orders below these limits will be rejected by the API.
+   *
+   * V2 note: feeRateBps/nonce/taker no longer exist on the signed order (fees
+   * are now computed by the protocol at match time) - this method never set
+   * them, so no behavior change here beyond the underlying SDK/package.
    */
   async createLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
     // Validate minimum order requirements before sending to API
@@ -314,6 +383,7 @@ export class TradingService {
         ]);
 
         const orderType = params.orderType === 'GTD' ? ClobOrderType.GTD : ClobOrderType.GTC;
+        const builderCode = params.builderCode ?? this.builderCode;
 
         const result = await client.createAndPostOrder(
           {
@@ -322,6 +392,7 @@ export class TradingService {
             price: params.price,
             size: params.size,
             expiration: params.expiration || 0,
+            ...(builderCode ? { builderCode } : {}),
           },
           { tickSize, negRisk },
           orderType
@@ -335,7 +406,11 @@ export class TradingService {
         return {
           success,
           orderId: result.orderID,
-          orderIds: result.orderIDs,
+          // CLOB V2's OrderResponse has no plural order-ID field (V1's
+          // `orderIDs` is gone; `tradeIDs` are trade IDs, not order IDs).
+          // Keep `orderIds` populated from the single order ID so existing
+          // consumers doing `orderIds?.[0]` keep working.
+          orderIds: result.orderID ? [result.orderID] : undefined,
           errorMsg: result.errorMsg,
           transactionHashes: result.transactionsHashes,
         };
@@ -375,6 +450,7 @@ export class TradingService {
         ]);
 
         const orderType = params.orderType === 'FAK' ? ClobOrderType.FAK : ClobOrderType.FOK;
+        const builderCode = params.builderCode ?? this.builderCode;
 
         const result = await client.createAndPostMarketOrder(
           {
@@ -382,6 +458,8 @@ export class TradingService {
             side: params.side === 'BUY' ? ClobSide.BUY : ClobSide.SELL,
             amount: params.amount,
             price: params.price,
+            ...(builderCode ? { builderCode } : {}),
+            ...(params.userUSDCBalance !== undefined ? { userUSDCBalance: params.userUSDCBalance } : {}),
           },
           { tickSize, negRisk },
           orderType
@@ -395,7 +473,11 @@ export class TradingService {
         return {
           success,
           orderId: result.orderID,
-          orderIds: result.orderIDs,
+          // CLOB V2's OrderResponse has no plural order-ID field (V1's
+          // `orderIDs` is gone; `tradeIDs` are trade IDs, not order IDs).
+          // Keep `orderIds` populated from the single order ID so existing
+          // consumers doing `orderIds?.[0]` keep working.
+          orderIds: result.orderID ? [result.orderID] : undefined,
           errorMsg: result.errorMsg,
           transactionHashes: result.transactionsHashes,
         };
@@ -568,17 +650,34 @@ export class TradingService {
   // Balance & Allowance
   // ============================================================================
 
+  /**
+   * Get collateral/conditional balance and allowance.
+   *
+   * CLOB V2 returns `allowances` as a per-spender map (one entry per Exchange
+   * contract) instead of V1's single `allowance` string. The scalar `allowance`
+   * is kept for backward compatibility with existing callers and reports the
+   * highest approval across spenders (i.e. "how much can actually be traded");
+   * the full per-spender breakdown is exposed as `allowances`.
+   */
   async getBalanceAllowance(
     assetType: 'COLLATERAL' | 'CONDITIONAL',
     tokenId?: string
-  ): Promise<{ balance: string; allowance: string }> {
+  ): Promise<{ balance: string; allowance: string; allowances: Record<string, string> }> {
     const client = await this.ensureInitialized();
     return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
       const result = await client.getBalanceAllowance({
         asset_type: assetType as any,
         token_id: tokenId,
       });
-      return { balance: result.balance, allowance: result.allowance };
+      const allowances = result.allowances ?? {};
+      const maxAllowance = Object.values(allowances).reduce<string>((max, cur) => {
+        try {
+          return BigInt(cur) > BigInt(max) ? cur : max;
+        } catch {
+          return max;
+        }
+      }, '0');
+      return { balance: result.balance, allowance: maxAllowance, allowances };
     });
   }
 

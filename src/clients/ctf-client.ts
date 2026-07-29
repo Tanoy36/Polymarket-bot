@@ -2,25 +2,31 @@
  * CTF (Conditional Token Framework) Client
  *
  * Provides on-chain operations for Polymarket's conditional tokens:
- * - Split: USDC → YES + NO token pair
- * - Merge: YES + NO → USDC
- * - Redeem: Winning tokens → USDC (after market resolution)
+ * - Split: pUSD → YES + NO token pair
+ * - Merge: YES + NO → pUSD
+ * - Redeem: Winning tokens → pUSD (after market resolution)
  *
- * ⚠️ CRITICAL: Polymarket CTF uses USDC.e (bridged), NOT native USDC!
+ * ⚠️ CRITICAL (2026 CLOB V2 migration): Polymarket's collateral token changed
+ * from USDC.e to Polymarket USD (pUSD) on April 28, 2026. CTF split/merge/redeem
+ * now settle in pUSD, not USDC.e. See https://docs.polymarket.com/concepts/pusd
  *
- * | Token         | Address                                    | CTF Compatible |
- * |---------------|--------------------------------------------|-----------------
- * | USDC.e        | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ✅ Yes         |
- * | Native USDC   | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ No          |
+ * | Token           | Address                                    | CTF Compatible |
+ * |-----------------|--------------------------------------------|-----------------
+ * | pUSD (current)  | 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB | ✅ Yes (2026+) |
+ * | USDC.e (legacy) | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ⚠️ Wrap first  |
+ * | Native USDC     | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ No          |
  *
- * Common Mistake:
- * - Your wallet has native USDC but CTF operations fail
- * - Solution: Use SwapService.transferUsdcE() or swap native USDC to USDC.e
+ * Common Mistake (post-migration):
+ * - Your wallet has leftover USDC.e from before April 28, 2026 but CTF operations fail
+ * - Solution: wrap it into pUSD via the CollateralOnramp contract's wrap() function
+ *   (see COLLATERAL_ONRAMP_CONTRACT below), or through the one-time conversion
+ *   prompt on polymarket.com.
  *
  * Based on: docs/01-product-research/06-poly-sdk/05-ctf-integration-plan.md
  *
  * Contract: Gnosis Conditional Tokens on Polygon
  * https://docs.polymarket.com/developers/CTF/overview
+ * https://docs.polymarket.com/v2-migration
  */
 
 import { ethers, Contract, Wallet, BigNumber } from 'ethers';
@@ -30,34 +36,68 @@ import { ethers, Contract, Wallet, BigNumber } from 'ethers';
 export const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 
 /**
- * USDC.e (Bridged USDC) - The ONLY USDC accepted by Polymarket CTF
+ * pUSD (Polymarket USD) - the collateral token used by Polymarket CTF and the
+ * CLOB since the April 28, 2026 V2 migration. Standard ERC-20 on Polygon,
+ * backed 1:1 by USDC, 6 decimals.
  *
- * ⚠️ WARNING: This is NOT native USDC (0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359)
- *
- * If your wallet has native USDC but CTF operations fail with "Insufficient USDC balance",
- * you need to swap your native USDC to USDC.e first using:
- * - SwapService.swap('USDC', 'USDC_E', amount)
- * - Or transfer USDC.e using SwapService.transferUsdcE()
+ * `USDC_CONTRACT` keeps its historical name for backward compatibility with
+ * every file in this codebase that imports it (dozens of scripts/services),
+ * but its value now points at pUSD - the actual token CTF trades against.
+ * Use the explicit `PUSD_CONTRACT` alias in new code for clarity.
  */
-export const USDC_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+export const PUSD_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 
-/** Native USDC on Polygon - NOT compatible with CTF */
+/** @deprecated Alias of PUSD_CONTRACT, kept for readability. Same value. */
+export const USDC_CONTRACT = PUSD_CONTRACT;
+
+/**
+ * USDC.e (bridged USDC) - the collateral token CTF used BEFORE the April 28,
+ * 2026 V2 migration. No longer accepted directly by CTF split/merge/redeem.
+ * Kept here only so the SDK can detect leftover balances and point users at
+ * the CollateralOnramp wrap() flow.
+ */
+export const LEGACY_USDCE_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
+/** Native USDC on Polygon - NOT compatible with CTF (before or after the migration) */
 export const NATIVE_USDC_CONTRACT = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 
-export const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+/**
+ * CollateralOnramp contract - wraps USDC.e (and previously, native USDC via
+ * the bridge) into pUSD. Call `wrap(asset, to, amount)` after approving this
+ * contract to spend the source asset. See https://docs.polymarket.com/concepts/pusd
+ */
+export const COLLATERAL_ONRAMP_CONTRACT = '0x93070a847efEf7F70739046A929D47a521F5B8ee';
+
+/**
+ * CTF Exchange (Standard) - V2 address, live since April 28, 2026.
+ * Old V1 address (no longer valid): 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
+ */
+export const CTF_EXCHANGE = '0xE111180000d2663C0091e4f400237545B87B996B';
+
+/**
+ * Neg Risk CTF Exchange - V2 address, live since April 28, 2026.
+ * Old V1 address (no longer valid): 0xC5d563A36AE78145C45a50134d48A1215220f80a
+ */
+export const NEG_RISK_CTF_EXCHANGE = '0xe2222d279d744050d28e00520010520000310F59';
+
+/**
+ * Neg Risk Adapter - unchanged by the V2 migration (only the Exchange
+ * contracts and collateral token changed). Verify against
+ * https://docs.polymarket.com/resources/contracts if in doubt.
+ */
 export const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 
-// USDC.e uses 6 decimals
+// pUSD (and legacy USDC.e) use 6 decimals
 export const USDC_DECIMALS = 6;
 
 // ===== ABIs =====
 
 const CTF_ABI = [
-  // Split: USDC → YES + NO
+  // Split: pUSD → YES + NO
   'function splitPosition(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount) external',
-  // Merge: YES + NO → USDC
+  // Merge: YES + NO → pUSD
   'function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount) external',
-  // Redeem: Winning tokens → USDC
+  // Redeem: Winning tokens → pUSD
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
   // Balance query
   'function balanceOf(address account, uint256 positionId) view returns (uint256)',
@@ -184,6 +224,7 @@ export class CTFClient {
   private wallet: Wallet;
   private ctfContract: Contract;
   private usdcContract: Contract;
+  private legacyUsdcEContract: Contract;
   private gasPriceMultiplier: number;
   private confirmations: number;
   private txTimeout: number;
@@ -196,6 +237,7 @@ export class CTFClient {
     this.wallet = new Wallet(config.privateKey, this.provider);
     this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
     this.usdcContract = new Contract(USDC_CONTRACT, ERC20_ABI, this.wallet);
+    this.legacyUsdcEContract = new Contract(LEGACY_USDCE_CONTRACT, ERC20_ABI, this.wallet);
     this.gasPriceMultiplier = config.gasPriceMultiplier || 1.2;
     this.confirmations = config.confirmations || 1;
     this.txTimeout = config.txTimeout || 60000;
@@ -209,17 +251,35 @@ export class CTFClient {
   }
 
   /**
-   * Get USDC.e (bridged USDC) balance - the token used by Polymarket CTF
+   * Get pUSD balance - the collateral token used by Polymarket CTF/CLOB since
+   * the April 28, 2026 V2 migration.
    *
-   * ⚠️ Note: This returns USDC.e balance, NOT native USDC balance.
-   * Polymarket CTF only accepts USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174).
+   * ⚠️ Note: Before the migration this returned USDC.e balance. The token
+   * address behind USDC_CONTRACT now points at pUSD - see PUSD_CONTRACT.
    *
-   * Common issue: Your wallet shows USDC balance but this returns 0
-   * - This means you have native USDC, not USDC.e
-   * - Use SwapService.swap('USDC', 'USDC_E', amount) to convert
+   * Common issue: Your wallet shows a USDC.e balance but this returns 0
+   * - You likely have leftover pre-migration USDC.e that hasn't been wrapped
+   * - Wrap it into pUSD via the CollateralOnramp contract (COLLATERAL_ONRAMP_CONTRACT)
+   *   or use getLegacyUsdcEBalance() to confirm, then wrap()
    */
   async getUsdcBalance(): Promise<string> {
     const balance = await this.usdcContract.balanceOf(this.wallet.address);
+    return ethers.utils.formatUnits(balance, USDC_DECIMALS);
+  }
+
+  /** Alias of getUsdcBalance() with an unambiguous name. Same value (pUSD). */
+  async getPusdBalance(): Promise<string> {
+    return this.getUsdcBalance();
+  }
+
+  /**
+   * Get leftover pre-migration USDC.e balance (for comparison/migration only).
+   *
+   * This is NOT the token used by CTF anymore. If this is non-zero, wrap it
+   * into pUSD via the CollateralOnramp contract before trading.
+   */
+  async getLegacyUsdcEBalance(): Promise<string> {
+    const balance = await this.legacyUsdcEContract.balanceOf(this.wallet.address);
     return ethers.utils.formatUnits(balance, USDC_DECIMALS);
   }
 
@@ -238,10 +298,10 @@ export class CTFClient {
    * Check if wallet is ready for CTF trading operations
    *
    * Verifies:
-   * - Has sufficient USDC.e (not native USDC)
+   * - Has sufficient pUSD (not native USDC, not leftover pre-migration USDC.e)
    * - Has MATIC for gas fees
    *
-   * @param amount - Minimum USDC.e amount needed (e.g., "100" for 100 USDC.e)
+   * @param amount - Minimum pUSD amount needed (e.g., "100" for 100 pUSD)
    * @returns Ready status with balances and suggestions
    *
    * @example
@@ -249,7 +309,7 @@ export class CTFClient {
    * const status = await ctf.checkReadyForCTF('100');
    * if (!status.ready) {
    *   console.log(status.suggestion);
-   *   // "You have 50 native USDC but 0 USDC.e. Swap native USDC to USDC.e first."
+   *   // "You have 50 leftover USDC.e that hasn't been wrapped into pUSD yet."
    * }
    * ```
    */
@@ -260,20 +320,24 @@ export class CTFClient {
     maticBalance: string;
     suggestion?: string;
   }> {
-    const [usdcE, nativeUsdc, matic] = await Promise.all([
+    const [pusd, legacyUsdcE, nativeUsdc, matic] = await Promise.all([
       this.getUsdcBalance(),
+      this.getLegacyUsdcEBalance(),
       this.getNativeUsdcBalance(),
       this.provider.getBalance(this.wallet.address),
     ]);
 
-    const usdcEBalance = parseFloat(usdcE);
+    const pusdBalance = parseFloat(pusd);
+    const legacyUsdcEBalance = parseFloat(legacyUsdcE);
     const nativeUsdcBalance = parseFloat(nativeUsdc);
     const maticBalance = parseFloat(ethers.utils.formatEther(matic));
     const amountNeeded = parseFloat(amount);
 
     const result = {
       ready: false,
-      usdcEBalance: usdcE,
+      // Field name kept as `usdcEBalance` for backward compatibility with
+      // every caller of this method - the value is now the pUSD balance.
+      usdcEBalance: pusd,
       nativeUsdcBalance: nativeUsdc,
       maticBalance: ethers.utils.formatEther(matic),
       suggestion: undefined as string | undefined,
@@ -285,16 +349,19 @@ export class CTFClient {
       return result;
     }
 
-    // Check USDC.e balance
-    if (usdcEBalance < amountNeeded) {
-      if (nativeUsdcBalance >= amountNeeded) {
-        result.suggestion = `You have ${nativeUsdcBalance.toFixed(2)} native USDC but only ${usdcEBalance.toFixed(2)} USDC.e. ` +
-          `Polymarket CTF requires USDC.e. Use SwapService.swap('USDC', 'USDC_E', '${amount}') to convert.`;
+    // Check pUSD balance
+    if (pusdBalance < amountNeeded) {
+      if (legacyUsdcEBalance >= amountNeeded) {
+        result.suggestion = `You have ${legacyUsdcEBalance.toFixed(2)} leftover (pre-migration) USDC.e but only ${pusdBalance.toFixed(2)} pUSD. ` +
+          `Polymarket now trades in pUSD. Wrap your USDC.e via the CollateralOnramp contract (${COLLATERAL_ONRAMP_CONTRACT}) or the one-time convert prompt on polymarket.com.`;
+      } else if (legacyUsdcEBalance > 0) {
+        result.suggestion = `Insufficient pUSD. Have: ${pusdBalance.toFixed(2)} pUSD + ${legacyUsdcEBalance.toFixed(2)} unwrapped USDC.e, need: ${amount} pUSD. ` +
+          `Wrap all leftover USDC.e into pUSD, then add more funds.`;
       } else if (nativeUsdcBalance > 0) {
-        result.suggestion = `Insufficient USDC.e. Have: ${usdcEBalance.toFixed(2)} USDC.e + ${nativeUsdcBalance.toFixed(2)} native USDC, need: ${amount} USDC.e. ` +
-          `Swap all native USDC to USDC.e, then add more funds.`;
+        result.suggestion = `Insufficient pUSD. Have: ${pusdBalance.toFixed(2)} pUSD, ${nativeUsdcBalance.toFixed(2)} native USDC (not usable directly). ` +
+          `Deposit/swap into pUSD to trade on Polymarket.`;
       } else {
-        result.suggestion = `Insufficient USDC.e. Have: ${usdcEBalance.toFixed(2)} USDC.e, need: ${amount} USDC.e.`;
+        result.suggestion = `Insufficient pUSD. Have: ${pusdBalance.toFixed(2)} pUSD, need: ${amount} pUSD.`;
       }
       return result;
     }
@@ -304,29 +371,29 @@ export class CTFClient {
   }
 
   /**
-   * Split USDC into YES + NO tokens
+   * Split pUSD into YES + NO tokens
    *
    * @param conditionId - Market condition ID
-   * @param amount - USDC amount (e.g., "100" for 100 USDC)
+   * @param amount - pUSD amount (e.g., "100" for 100 pUSD)
    * @returns SplitResult with transaction details
    *
    * @example
    * ```typescript
    * const result = await ctf.split(conditionId, "100");
-   * console.log(`Split ${result.amount} USDC into tokens`);
+   * console.log(`Split ${result.amount} pUSD into tokens`);
    * console.log(`TX: ${result.txHash}`);
    * ```
    */
   async split(conditionId: string, amount: string): Promise<SplitResult> {
     const amountWei = ethers.utils.parseUnits(amount, USDC_DECIMALS);
 
-    // 1. Check USDC balance
+    // 1. Check pUSD balance
     const balance = await this.usdcContract.balanceOf(this.wallet.address);
     if (balance.lt(amountWei)) {
-      throw new Error(`Insufficient USDC balance. Have: ${ethers.utils.formatUnits(balance, USDC_DECIMALS)}, Need: ${amount}`);
+      throw new Error(`Insufficient pUSD balance. Have: ${ethers.utils.formatUnits(balance, USDC_DECIMALS)}, Need: ${amount}`);
     }
 
-    // 2. Check and approve USDC if needed
+    // 2. Check and approve pUSD if needed
     const allowance = await this.usdcContract.allowance(this.wallet.address, CTF_CONTRACT);
     if (allowance.lt(amountWei)) {
       const approveTx = await this.usdcContract.approve(
@@ -361,7 +428,7 @@ export class CTFClient {
   }
 
   /**
-   * Merge YES + NO tokens back to USDC
+   * Merge YES + NO tokens back to pUSD
    *
    * @param conditionId - Market condition ID
    * @param amount - Number of token pairs to merge (e.g., "100" for 100 YES + 100 NO)
@@ -371,7 +438,7 @@ export class CTFClient {
    * ```typescript
    * // After buying 100 YES and 100 NO via TradingClient
    * const result = await ctf.merge(conditionId, "100");
-   * console.log(`Received ${result.usdcReceived} USDC`);
+   * console.log(`Received ${result.usdcReceived} pUSD`);
    * ```
    */
   async merge(conditionId: string, amount: string): Promise<MergeResult> {
@@ -410,7 +477,7 @@ export class CTFClient {
   }
 
   /**
-   * Merge YES and NO tokens back into USDC using explicit token IDs
+   * Merge YES and NO tokens back into pUSD using explicit token IDs
    *
    * This method uses the provided token IDs for balance checking, which is
    * necessary when working with Polymarket CLOB markets where token IDs
@@ -559,7 +626,7 @@ export class CTFClient {
    * };
    * const result = await ctf.redeemByTokenIds(conditionId, tokenIds);
    * console.log(`Redeemed ${result.tokensRedeemed} ${result.outcome} tokens`);
-   * console.log(`Received ${result.usdcReceived} USDC`);
+   * console.log(`Received ${result.usdcReceived} pUSD`);
    * ```
    *
    * @see redeem - Only use for standard CTF markets (non-Polymarket)
@@ -1029,7 +1096,7 @@ export class CTFClient {
   }
 
   /**
-   * Check if wallet has sufficient USDC for split
+   * Check if wallet has sufficient pUSD for split
    */
   async canSplit(amount: string): Promise<{ canSplit: boolean; reason?: string }> {
     try {
@@ -1040,7 +1107,7 @@ export class CTFClient {
       if (balanceNum < amountNum) {
         return {
           canSplit: false,
-          reason: `Insufficient USDC. Have: ${balance}, Need: ${amount}`
+          reason: `Insufficient pUSD. Have: ${balance}, Need: ${amount}`
         };
       }
 
@@ -1204,14 +1271,14 @@ export function calculateConditionId(
 }
 
 /**
- * Parse USDC amount to BigNumber (6 decimals)
+ * Parse pUSD/USDC amount to BigNumber (6 decimals)
  */
 export function parseUsdc(amount: string): BigNumber {
   return ethers.utils.parseUnits(amount, USDC_DECIMALS);
 }
 
 /**
- * Format BigNumber to USDC string (6 decimals)
+ * Format BigNumber to pUSD/USDC string (6 decimals)
  */
 export function formatUsdc(amount: BigNumber): string {
   return ethers.utils.formatUnits(amount, USDC_DECIMALS);

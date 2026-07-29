@@ -4,8 +4,13 @@
  * Manages ERC20 and ERC1155 approvals required for trading on Polymarket.
  *
  * Required approvals for trading:
- * - ERC20 (USDC): Approve USDC spending for CTF Exchange, Neg Risk Exchange, etc.
+ * - ERC20 (pUSD): Approve pUSD spending for the CTF Exchange, Neg Risk Exchange, etc.
  * - ERC1155 (Conditional Tokens): Approve operators for conditional token transfers
+ *
+ * ⚠️ 2026 CLOB V2 migration: both the collateral token (USDC.e → pUSD) and the
+ * Exchange contract addresses changed on April 28, 2026. Approvals against the
+ * old V1 Exchange addresses do NOT carry over - wallets must re-approve the V2
+ * Exchange contracts before they can trade. See https://docs.polymarket.com/v2-migration
  *
  * @see https://docs.polymarket.com/
  */
@@ -13,13 +18,16 @@
 import { ethers } from 'ethers';
 import {
   CTF_CONTRACT,
+  CTF_EXCHANGE,
   NEG_RISK_CTF_EXCHANGE,
   NEG_RISK_ADAPTER,
   USDC_CONTRACT,
 } from '../clients/ctf-client.js';
 
 // Contract addresses
-const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+// CTF_EXCHANGE and NEG_RISK_CTF_EXCHANGE are now imported from ctf-client.ts
+// (V2 addresses, live since April 28, 2026) rather than hardcoded here, so
+// there is a single source of truth for the Exchange contracts.
 const CONDITIONAL_TOKENS = CTF_CONTRACT;
 
 // ABIs
@@ -70,7 +78,10 @@ export interface AuthorizationServiceConfig {
   provider?: ethers.providers.Provider;
 }
 
-// Contracts that need ERC20 approval
+// Contracts that need ERC20 (pUSD) approval.
+// NOTE: CTF_EXCHANGE and NEG_RISK_CTF_EXCHANGE are the V2 Exchange contracts.
+// NEG_RISK_ADAPTER is unchanged by the V2 migration; kept for backward
+// compatibility with markets/positions that still route through it.
 const ERC20_SPENDERS = [
   { name: 'CTF Exchange', address: CTF_EXCHANGE },
   { name: 'Neg Risk CTF Exchange', address: NEG_RISK_CTF_EXCHANGE },
@@ -121,7 +132,7 @@ export class AuthorizationService {
   }
 
   /**
-   * Check all ERC20 and ERC1155 allowances required for trading
+   * Check all ERC20 (pUSD) and ERC1155 allowances required for trading
    *
    * @returns Status of all allowances and whether trading is ready
    */
@@ -131,7 +142,7 @@ export class AuthorizationService {
     const usdc = new ethers.Contract(USDC_CONTRACT, ERC20_ABI, this.provider);
     const conditionalTokens = new ethers.Contract(CONDITIONAL_TOKENS, ERC1155_ABI, this.provider);
 
-    // Check USDC balance
+    // Check pUSD balance
     const balance = await usdc.balanceOf(walletAddress);
     const balanceFormatted = ethers.utils.formatUnits(balance, 6);
 
@@ -166,7 +177,7 @@ export class AuthorizationService {
     const issues: string[] = [];
     for (const a of erc20Allowances) {
       if (!a.approved) {
-        issues.push(`ERC20: ${a.contract} needs USDC approval`);
+        issues.push(`ERC20: ${a.contract} needs pUSD approval`);
       }
     }
     for (const a of erc1155Approvals) {
@@ -291,7 +302,7 @@ export class AuthorizationService {
   }
 
   /**
-   * Approve USDC spending for a specific contract
+   * Approve pUSD spending for a specific contract
    *
    * @param spenderAddress - The contract address to approve
    * @param amount - The amount to approve (default: unlimited)

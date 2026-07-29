@@ -1,7 +1,7 @@
 /**
  * Check and Set CTF Token Approvals for Polymarket Trading
  *
- * The CLOB Exchange requires approval for CTF tokens (ERC1155) in addition to USDC.e.
+ * The CLOB Exchange requires approval for CTF tokens (ERC1155) in addition to pUSD.
  * Without CTF token approval, orders fail with "not enough balance / allowance".
  *
  * Usage:
@@ -15,9 +15,9 @@ const PRIVATE_KEY = process.env.POLY_PRIVKEY || '';
 const RPC_URL = process.env.POLYGON_RPC_URL || 'https://polygon-mainnet.g.alchemy.com/v2/demo';
 
 // Contracts
-const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
-const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+const PUSD_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+const CTF_EXCHANGE = '0xE111180000d2663C0091e4f400237545B87B996B';
+const NEG_RISK_CTF_EXCHANGE = '0xe2222d279d744050d28e00520010520000310F59';
 const CTF_TOKEN = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';  // Conditional Tokens (ERC1155)
 
 const ERC20_ABI = [
@@ -51,13 +51,13 @@ async function main() {
   console.log('Wallet:', address);
   console.log('');
 
-  // Check USDC.e
-  const usdc = new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, provider);
+  // Check pUSD
+  const usdc = new ethers.Contract(PUSD_ADDRESS, ERC20_ABI, provider);
   const balance = await usdc.balanceOf(address);
   const ctfUsdcAllowance = await usdc.allowance(address, CTF_EXCHANGE);
   const negRiskUsdcAllowance = await usdc.allowance(address, NEG_RISK_CTF_EXCHANGE);
 
-  console.log('─── USDC.e (Collateral) ───');
+  console.log('─── pUSD (Collateral) ───');
   const balanceUsdc = parseFloat(ethers.utils.formatUnits(balance, 6));
   console.log('Balance:              ' + balanceUsdc.toFixed(6) + ' USDC');
   console.log('CTF Exchange Allow:   ' + (ctfUsdcAllowance.gte(ethers.constants.MaxUint256.div(2)) ? 'Unlimited ✅' : ethers.utils.formatUnits(ctfUsdcAllowance, 6) + ' USDC'));
@@ -97,26 +97,26 @@ async function main() {
     console.log('Gas Price:', ethers.utils.formatUnits(gasPrice, 'gwei'), 'gwei');
     console.log('');
 
-    // 1. Approve USDC.e for CTF Exchange
+    // 1. Approve pUSD for CTF Exchange
     if (ctfUsdcAllowance.lt(ethers.constants.MaxUint256.div(2))) {
-      console.log('1. Approving USDC.e for CTF Exchange...');
+      console.log('1. Approving pUSD for CTF Exchange...');
       const tx1 = await usdcWithSigner.approve(CTF_EXCHANGE, ethers.constants.MaxUint256, { gasPrice });
       console.log('   TX:', tx1.hash);
       await tx1.wait();
       console.log('   ✅ Confirmed');
     } else {
-      console.log('1. USDC.e CTF Exchange: Already approved ✓');
+      console.log('1. pUSD CTF Exchange: Already approved ✓');
     }
 
-    // 2. Approve USDC.e for Neg Risk CTF Exchange
+    // 2. Approve pUSD for Neg Risk CTF Exchange
     if (negRiskUsdcAllowance.lt(ethers.constants.MaxUint256.div(2))) {
-      console.log('2. Approving USDC.e for Neg Risk CTF Exchange...');
+      console.log('2. Approving pUSD for Neg Risk CTF Exchange...');
       const tx2 = await usdcWithSigner.approve(NEG_RISK_CTF_EXCHANGE, ethers.constants.MaxUint256, { gasPrice });
       console.log('   TX:', tx2.hash);
       await tx2.wait();
       console.log('   ✅ Confirmed');
     } else {
-      console.log('2. USDC.e Neg Risk CTF: Already approved ✓');
+      console.log('2. pUSD Neg Risk CTF: Already approved ✓');
     }
 
     // 3. Approve CTF Tokens for CTF Exchange

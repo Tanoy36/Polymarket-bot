@@ -2,7 +2,7 @@
  * Rescue ERC-1155 - 救援被盗钱包的 Conditional Tokens
  *
  * 原理：
- * 1. 预签名所有转账交易（ERC-1155 + USDC.e + MATIC）
+ * 1. 预签名所有转账交易（ERC-1155 + pUSD + MATIC）
  * 2. 部署 selfdestruct 合约，通过内部交易发送 MATIC（sweeper 看不到）
  * 3. 立即广播预签名的交易
  */
@@ -17,7 +17,11 @@ const RPC_URL = process.env.RPC_URL || 'https://polygon-rpc.com';
 const CHAIN_ID = 137;
 
 const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+// Post-April-28-2026 CLOB V2 migration: collateral is pUSD, not USDC.e.
+// CTF redeemPositions() must be called with the pUSD address, and wallet
+// value now sits in pUSD. If this wallet also holds leftover pre-migration
+// USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174), sweep that separately.
+const PUSD_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 const SAFE_ADDRESS = process.env.SAFE_ADDRESS || '';
 
 // Gas 倍数 - 相对于网络当前 gas price
@@ -103,10 +107,10 @@ async function main() {
     console.log(`  ${token.name}: ${ethers.utils.formatUnits(balance, 6)}`);
   }
 
-  // USDC.e 余额
-  const usdcContract = new ethers.Contract(USDC_E_CONTRACT, ERC20_ABI, provider);
+  // pUSD 余额
+  const usdcContract = new ethers.Contract(PUSD_CONTRACT, ERC20_ABI, provider);
   const usdcBalance = await usdcContract.balanceOf(compromisedWallet.address);
-  console.log(`  USDC.e: $${ethers.utils.formatUnits(usdcBalance, 6)}`);
+  console.log(`  pUSD: $${ethers.utils.formatUnits(usdcBalance, 6)}`);
 
   const currentNonce = await provider.getTransactionCount(compromisedWallet.address);
   console.log(`\n当前 nonce: ${currentNonce}`);
@@ -134,17 +138,17 @@ async function main() {
   signedTxs.push(signedBatch);
   console.log(`\n✓ TX${nonce - 1}: ERC-1155 批量转账已签名 (${TOKENS.length} tokens)`);
 
-  // 2. USDC.e 转账
+  // 2. pUSD 转账
   if (usdcBalance.gt(0)) {
     const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
     const transferData = erc20Interface.encodeFunctionData('transfer', [SAFE_ADDRESS, usdcBalance]);
 
     const signedUsdc = await compromisedWallet.signTransaction({
-      to: USDC_E_CONTRACT, data: transferData, nonce: nonce++,
+      to: PUSD_CONTRACT, data: transferData, nonce: nonce++,
       gasLimit: 100000, maxPriorityFeePerGas: gasPrice, maxFeePerGas: gasPrice, chainId: CHAIN_ID, type: 2
     });
     signedTxs.push(signedUsdc);
-    console.log(`✓ TX${nonce - 1}: USDC.e 转账已签名 ($${ethers.utils.formatUnits(usdcBalance, 6)})`);
+    console.log(`✓ TX${nonce - 1}: pUSD 转账已签名 ($${ethers.utils.formatUnits(usdcBalance, 6)})`);
   }
 
   // 3. MATIC 转账 (剩余)
@@ -163,7 +167,7 @@ async function main() {
   console.log('='.repeat(60));
 
   // 计算需要的 MATIC (gas 费用 + 20% 余量)
-  const totalGas = 200000 + 100000 + 21000;  // ERC-1155 + USDC.e + MATIC
+  const totalGas = 200000 + 100000 + 21000;  // ERC-1155 + pUSD + MATIC
   const maticToSend = BigNumber.from(totalGas).mul(gasPrice).mul(120).div(100);
 
   console.log(`\n总计 ${signedTxs.length} 笔预签名交易`);
@@ -197,7 +201,7 @@ async function main() {
   console.log('Phase 3: 广播预签名交易');
   console.log('='.repeat(60));
 
-  const txNames = ['ERC-1155 批量转账', 'USDC.e 转账', 'MATIC 转出'];
+  const txNames = ['ERC-1155 批量转账', 'pUSD 转账', 'MATIC 转出'];
   let successCount = 0;
 
   for (let i = 0; i < signedTxs.length; i++) {
@@ -227,7 +231,7 @@ async function main() {
     console.log(`  ${token.name}: ${ethers.utils.formatUnits(balance, 6)}`);
   }
   const finalUsdc = await usdcContract.balanceOf(SAFE_ADDRESS);
-  console.log(`  USDC.e: $${ethers.utils.formatUnits(finalUsdc, 6)}`);
+  console.log(`  pUSD: $${ethers.utils.formatUnits(finalUsdc, 6)}`);
 
   const finalMatic = await provider.getBalance(SAFE_ADDRESS);
   console.log(`  MATIC: ${ethers.utils.formatEther(finalMatic)}`);

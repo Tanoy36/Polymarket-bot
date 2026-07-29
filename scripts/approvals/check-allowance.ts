@@ -1,5 +1,5 @@
 /**
- * Check and Set USDC.e Allowance for Polymarket Trading
+ * Check and Set pUSD Allowance for Polymarket Trading
  *
  * Usage:
  *   # Check current allowance
@@ -44,8 +44,8 @@ async function main() {
   const balanceUsdc = parseFloat(balance) / 1e6;
   const allowanceUsdc = allowance ? parseFloat(allowance) / 1e6 : Infinity;
 
-  console.log(`USDC.e Balance:   ${balanceUsdc.toFixed(6)} USDC`);
-  console.log(`USDC.e Allowance: ${allowance === 'unlimited' || allowanceUsdc > 1e12 ? 'Unlimited' : allowanceUsdc.toFixed(6) + ' USDC'}`);
+  console.log(`pUSD Balance:   ${balanceUsdc.toFixed(6)} USDC`);
+  console.log(`pUSD Allowance: ${allowance === 'unlimited' || allowanceUsdc > 1e12 ? 'Unlimited' : allowanceUsdc.toFixed(6) + ' USDC'}`);
   console.log('');
 
   // Check if allowance is sufficient
@@ -58,7 +58,7 @@ async function main() {
 
   if (command === 'approve') {
     console.log('─── Approving Unlimited Allowance ───');
-    console.log('This will approve unlimited USDC.e spending for Polymarket.');
+    console.log('This will approve unlimited pUSD spending for Polymarket.');
     console.log('');
 
     try {
@@ -77,19 +77,19 @@ async function main() {
         const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
         const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-        // USDC.e contract on Polygon
-        const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+        // pUSD contract on Polygon
+        const PUSD_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
         // CTF Exchange contract (where orders are executed)
-        const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+        const CTF_EXCHANGE = '0xE111180000d2663C0091e4f400237545B87B996B';
         // Neg Risk CTF Exchange
-        const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+        const NEG_RISK_CTF_EXCHANGE = '0xe2222d279d744050d28e00520010520000310F59';
 
         const ERC20_ABI = [
           'function approve(address spender, uint256 amount) returns (bool)',
           'function allowance(address owner, address spender) view returns (uint256)',
         ];
 
-        const usdc = new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, wallet);
+        const usdc = new ethers.Contract(PUSD_ADDRESS, ERC20_ABI, wallet);
         const MAX_UINT256 = ethers.constants.MaxUint256;
 
         // Approve both exchanges

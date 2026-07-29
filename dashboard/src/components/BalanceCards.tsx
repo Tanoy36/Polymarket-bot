@@ -67,7 +67,7 @@ export function BalanceCards({ state }: BalanceCardsProps) {
       />
       <BalanceCard
         icon="💰"
-        label="USDC.e"
+        label="pUSD"
         value={`$${formatCurrency(usdce)}`}
         subLabel="Native"
         gradient="bg-gradient-to-br from-blue-500/10 to-blue-500/5"

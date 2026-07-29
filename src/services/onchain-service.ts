@@ -29,7 +29,7 @@
  * await onchain.merge(conditionId, '100');
  *
  * // Swap tokens
- * await onchain.swap('MATIC', 'USDC_E', '10');
+ * await onchain.swap('MATIC', 'PUSD', '10');
  * ```
  */
 
@@ -97,6 +97,8 @@ export interface TokenBalances {
   matic: string;
   usdc: string;
   usdcE: string;
+  /** pUSD balance - the collateral token Polymarket trades in since the April 28, 2026 CLOB V2 migration */
+  pusd: string;
   usdt: string;
   dai: string;
   weth: string;
@@ -202,6 +204,7 @@ export class OnchainService {
       matic: findBalance('MATIC'),
       usdc: findBalance('USDC'),
       usdcE: findBalance('USDC_E'),
+      pusd: findBalance('PUSD'),
       usdt: findBalance('USDT'),
       dai: findBalance('DAI'),
       weth: findBalance('WETH'),
@@ -230,7 +233,7 @@ export class OnchainService {
   }
 
   /**
-   * Approve USDC spending for a specific contract
+   * Approve pUSD spending for a specific contract
    */
   async approveUsdc(
     spenderAddress: string,
@@ -252,10 +255,10 @@ export class OnchainService {
   // ===== CTF Operations =====
 
   /**
-   * Split USDC into YES + NO tokens
+   * Split pUSD into YES + NO tokens
    *
    * @param conditionId - Market condition ID
-   * @param amount - USDC amount (e.g., "100" for 100 USDC)
+   * @param amount - pUSD amount (e.g., "100" for 100 pUSD)
    * @returns SplitResult with transaction details
    */
   async split(conditionId: string, amount: string): Promise<SplitResult> {
@@ -263,7 +266,7 @@ export class OnchainService {
   }
 
   /**
-   * Merge YES + NO tokens back to USDC
+   * Merge YES + NO tokens back to pUSD
    *
    * @param conditionId - Market condition ID
    * @param amount - Number of token pairs to merge
@@ -320,7 +323,8 @@ export class OnchainService {
   // ===== Balances =====
 
   /**
-   * Get USDC.e (bridged USDC) balance - the token used by Polymarket CTF
+   * Get pUSD balance - the token used by Polymarket CTF/CLOB since the
+   * April 28, 2026 V2 migration. Method name kept for backward compatibility.
    */
   async getUsdcBalance(): Promise<string> {
     return this.ctfClient.getUsdcBalance();
@@ -331,6 +335,13 @@ export class OnchainService {
    */
   async getNativeUsdcBalance(): Promise<string> {
     return this.ctfClient.getNativeUsdcBalance();
+  }
+
+  /**
+   * Get leftover pre-migration USDC.e balance (for migration/detection only)
+   */
+  async getLegacyUsdcEBalance(): Promise<string> {
+    return this.ctfClient.getLegacyUsdcEBalance();
   }
 
   /**
@@ -404,7 +415,7 @@ export class OnchainService {
   }
 
   /**
-   * Check if wallet has sufficient USDC for split
+   * Check if wallet has sufficient pUSD for split
    */
   async canSplit(amount: string): Promise<{ canSplit: boolean; reason?: string }> {
     return this.ctfClient.canSplit(amount);
@@ -475,7 +486,7 @@ export class OnchainService {
    * Execute a token swap using QuickSwap V3
    *
    * @param tokenIn - Token to swap from (e.g., 'MATIC', 'USDC', 'USDT')
-   * @param tokenOut - Token to swap to (e.g., 'USDC_E', 'WETH')
+   * @param tokenOut - Token to swap to (e.g., 'PUSD', 'WETH')
    * @param amount - Amount to swap in token units
    * @param slippage - Slippage tolerance in percent (default: 0.5)
    */
@@ -489,10 +500,11 @@ export class OnchainService {
   }
 
   /**
-   * Swap any supported token to USDC.e and deposit to Polymarket
+   * Swap any supported token to pUSD and deposit to Polymarket
    *
-   * This is a convenience method for converting tokens to the USDC.e
-   * format required by Polymarket CTF operations.
+   * This is a convenience method for converting tokens to the pUSD
+   * format required by Polymarket CTF operations since the April 28, 2026
+   * CLOB V2 migration.
    */
   async swapAndDeposit(
     token: string,
@@ -500,7 +512,7 @@ export class OnchainService {
     slippage?: number
   ): Promise<SwapResult> {
     return this.swapService.swapToUsdc(token, amount, {
-      usdcType: 'USDC_E',
+      usdcType: 'PUSD',
       slippage,
     });
   }
@@ -538,8 +550,8 @@ export class OnchainService {
   /**
    * Transfer native USDC to another address
    *
-   * WARNING: This transfers NATIVE USDC, not USDC.e.
-   * For Polymarket CTF operations, use transferUsdcE() instead.
+   * WARNING: This transfers NATIVE USDC, not pUSD.
+   * For Polymarket trading/CTF operations, use transferPusd() instead.
    */
   async transferUsdc(to: string, amount: string): Promise<TransferResult> {
     return this.swapService.transferUsdc(to, amount);
@@ -548,10 +560,20 @@ export class OnchainService {
   /**
    * Transfer USDC.e (bridged USDC) to another address
    *
-   * This is the correct method for Polymarket CTF operations.
+   * @deprecated Legacy pre-migration token. Use transferPusd() for current
+   * Polymarket trading/CTF operations.
    */
   async transferUsdcE(to: string, amount: string): Promise<TransferResult> {
     return this.swapService.transferUsdcE(to, amount);
+  }
+
+  /**
+   * Transfer pUSD (Polymarket USD) to another address
+   *
+   * This is the correct method for Polymarket trading/CTF operations.
+   */
+  async transferPusd(to: string, amount: string): Promise<TransferResult> {
+    return this.swapService.transferPusd(to, amount);
   }
 
   // ===== MATIC Wrapping =====

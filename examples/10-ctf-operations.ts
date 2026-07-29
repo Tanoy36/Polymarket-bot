@@ -7,26 +7,30 @@
  * - Redeem: Winning tokens → USDC (after resolution)
  * - Balance queries and gas estimation
  *
- * ⚠️ CRITICAL: Polymarket CTF uses USDC.e (bridged), NOT native USDC!
+ * ⚠️ CRITICAL: Since the April 28, 2026 CLOB V2 migration, Polymarket CTF uses
+ * pUSD - NOT native USDC and NOT USDC.e!
  *
- * | Token         | Address                                    | CTF Compatible |
- * |---------------|--------------------------------------------|----------------|
- * | USDC.e        | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ✅ Yes         |
- * | Native USDC   | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ No          |
+ * | Token           | Address                                    | CTF Compatible |
+ * |-----------------|--------------------------------------------|----------------|
+ * | pUSD            | 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB | ✅ Yes         |
+ * | USDC.e (legacy) | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ⚠️ Wrap first  |
+ * | Native USDC     | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ No          |
  *
  * Common Mistake:
  * - Your wallet shows USDC balance in block explorers/wallets
- * - But CTF operations fail with "Insufficient USDC balance"
- * - This is because you have native USDC, not USDC.e
+ * - But CTF operations fail with "Insufficient balance"
+ * - This is because you have native USDC or legacy USDC.e, not pUSD
  *
  * Solution:
- * - Swap native USDC to USDC.e: SwapService.swap('USDC', 'USDC_E', amount)
- * - Or use SwapService.transferUsdcE() when funding wallets
+ * - Swap native USDC to pUSD: SwapService.swap('USDC', 'PUSD', amount)
+ * - Wrap leftover USDC.e into pUSD via the CollateralOnramp contract
+ *   (COLLATERAL_ONRAMP_CONTRACT) or the convert prompt on polymarket.com
+ * - Or use SwapService.transferPusd() when funding wallets
  * - Use CTFClient.checkReadyForCTF() to verify before operations
  *
  * IMPORTANT: These are real on-chain transactions!
  * - Require MATIC for gas fees
- * - Require USDC.e (NOT native USDC) for split operations
+ * - Require pUSD (NOT native USDC, NOT USDC.e) for split operations
  * - Test on small amounts first
  *
  * Set environment variables:
@@ -311,18 +315,22 @@ async function demonstrateConcepts() {
   console.log('  Split/Merge/Redeem: ~200,000-300,000 gas');
   console.log('  At ~30 gwei, ~$0.003-0.005 per operation\n');
 
-  console.log('⚠️  IMPORTANT: USDC.e vs Native USDC');
+  console.log('⚠️  IMPORTANT: pUSD is the collateral token (CLOB V2)');
   console.log('┌─────────────────────────────────────────────────────────────┐');
-  console.log('│ Polymarket CTF ONLY accepts USDC.e (bridged USDC)          │');
+  console.log('│ Polymarket CTF ONLY accepts pUSD since Apr 28, 2026        │');
   console.log('│                                                             │');
-  console.log('│ USDC.e:      0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 ✅  │');
+  console.log('│ pUSD:        0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB ✅  │');
+  console.log('│ USDC.e:      0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 ⚠️   │');
   console.log('│ Native USDC: 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 ❌  │');
   console.log('│                                                             │');
-  console.log('│ If you have native USDC, swap to USDC.e first:             │');
-  console.log('│   SwapService.swap("USDC", "USDC_E", amount)               │');
+  console.log('│ If you have native USDC, swap to pUSD first:               │');
+  console.log('│   SwapService.swap("USDC", "PUSD", amount)                 │');
+  console.log('│                                                             │');
+  console.log('│ Leftover USDC.e must be wrapped into pUSD via the          │');
+  console.log('│ CollateralOnramp contract (or polymarket.com convert).     │');
   console.log('│                                                             │');
   console.log('│ When funding wallets for CTF, use:                         │');
-  console.log('│   SwapService.transferUsdcE(to, amount)                    │');
+  console.log('│   SwapService.transferPusd(to, amount)                     │');
   console.log('└─────────────────────────────────────────────────────────────┘\n');
 
   console.log('To run actual CTF operations:');

@@ -22,7 +22,7 @@ if (!PRIVATE_KEY) {
   process.exit(1);
 }
 
-const USDC_E = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const PUSD = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 
 const ERC20_ABI = [
@@ -55,7 +55,7 @@ async function main() {
       const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
       console.log(`Wallet: ${wallet.address}`);
 
-      const usdc = new ethers.Contract(USDC_E, ERC20_ABI, wallet);
+      const usdc = new ethers.Contract(PUSD, ERC20_ABI, wallet);
 
       // Check current allowance
       const currentAllowance = await usdc.allowance(wallet.address, NEG_RISK_ADAPTER);
@@ -96,7 +96,7 @@ async function main() {
 
   console.log('\n❌ All RPCs failed!');
   console.log('Please approve manually on Polygonscan:');
-  console.log('https://polygonscan.com/token/0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174#writeContract');
+  console.log('https://polygonscan.com/token/0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB#writeContract');
 }
 
 main().catch(console.error);

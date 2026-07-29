@@ -2,7 +2,7 @@
  * Swap Service
  *
  * Provides DEX swap functionality on Polygon using QuickSwap V3.
- * Supports swapping between various tokens including MATIC, WETH, USDC, USDC.e, USDT, DAI.
+ * Supports swapping between various tokens including MATIC, WETH, USDC, USDC.e, pUSD, USDT, DAI.
  */
 
 import { ethers, Contract, BigNumber } from 'ethers';
@@ -18,29 +18,34 @@ export const WMATIC = '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270';
 /**
  * Supported tokens on Polygon
  *
- * ⚠️ IMPORTANT: USDC vs USDC.e for Polymarket CTF
+ * ⚠️ IMPORTANT: pUSD vs USDC.e vs native USDC for Polymarket
  *
- * | Token       | Address                                    | Polymarket CTF |
- * |-------------|--------------------------------------------|-----------------
- * | USDC_E      | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ✅ Required    |
- * | USDC/NATIVE | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ Not accepted|
+ * Since the April 28, 2026 CLOB V2 migration, Polymarket trades and settles in
+ * pUSD, not USDC.e. USDC.e is kept here only so leftover pre-migration
+ * balances can be detected and wrapped into pUSD via the CollateralOnramp
+ * contract (see src/clients/ctf-client.ts: COLLATERAL_ONRAMP_CONTRACT).
  *
- * For Polymarket CTF operations (split/merge/redeem):
- * - Use transferUsdcE() to send USDC.e
- * - Use swap('USDC', 'USDC_E', amount) to convert native USDC to USDC.e
+ * | Token       | Address                                    | Polymarket (2026+) |
+ * |-------------|--------------------------------------------|---------------------
+ * | PUSD        | 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB | ✅ Required        |
+ * | USDC_E      | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | ⚠️ Legacy - wrap it |
+ * | USDC/NATIVE | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | ❌ Not accepted    |
  *
- * For general transfers:
- * - transferUsdc() sends native USDC (most DEXs, CEXs use this)
- * - transferUsdcE() sends bridged USDC.e (Polymarket CTF requires this)
+ * For Polymarket trading/CTF operations:
+ * - Use transferPusd() to send pUSD
+ * - Use swap('USDC', 'PUSD', amount) to convert native USDC to pUSD
+ * - Leftover USDC.e should be wrapped via the CollateralOnramp contract
  */
 export const POLYGON_TOKENS = {
   // Native MATIC (use WMATIC address for swaps)
   MATIC: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
   WMATIC: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
   // USDC variants - SEE ABOVE FOR POLYMARKET COMPATIBILITY
-  USDC: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',       // Native USDC - NOT for Polymarket CTF
+  USDC: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',       // Native USDC - NOT for Polymarket
   NATIVE_USDC: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', // Alias for USDC
-  USDC_E: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',      // Bridged USDC.e - REQUIRED for Polymarket CTF
+  USDC_E: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',      // Bridged USDC.e - LEGACY, wrap into pUSD
+  // Polymarket USD - the collateral token used by Polymarket since April 28, 2026 (CLOB V2)
+  PUSD: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB',
   // Other stables
   USDT: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
   DAI: '0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063',
@@ -55,6 +60,7 @@ export const TOKEN_DECIMALS: Record<string, number> = {
   USDC: 6,
   NATIVE_USDC: 6,
   USDC_E: 6,
+  PUSD: 6,
   USDT: 6,
   DAI: 18,
   WETH: 18,
@@ -464,8 +470,9 @@ export class SwapService {
       decimals: 18,
     });
 
-    // Get ERC20 balances
-    const tokens = ['USDC', 'USDC_E', 'USDT', 'DAI', 'WETH', 'WMATIC'];
+    // Get ERC20 balances (PUSD added for the CLOB V2 collateral migration -
+    // this is the balance that actually matters for trading on Polymarket)
+    const tokens = ['USDC', 'PUSD', 'USDC_E', 'USDT', 'DAI', 'WETH', 'WMATIC'];
     for (const tokenSymbol of tokens) {
       const address = POLYGON_TOKENS[tokenSymbol as SupportedToken];
       const contract = new Contract(address, ERC20_ABI, this.provider);
@@ -602,7 +609,7 @@ export class SwapService {
 
     // Calculate min output with slippage
     // Only stablecoin pairs can use ~1:1 ratio estimation
-    const stablecoins = ['USDC', 'NATIVE_USDC', 'USDC_E', 'USDT', 'DAI'];
+    const stablecoins = ['USDC', 'NATIVE_USDC', 'USDC_E', 'PUSD', 'USDT', 'DAI'];
     const isStablecoinPair = stablecoins.includes(actualTokenIn) && stablecoins.includes(upperTokenOut);
 
     let minAmountOut: BigNumber;
@@ -655,17 +662,17 @@ export class SwapService {
   }
 
   /**
-   * Swap any supported token to USDC (for deposit)
+   * Swap any supported token to USDC/pUSD (for deposit)
    */
   async swapToUsdc(
     tokenIn: string,
     amountIn: string,
     options: {
-      usdcType?: 'NATIVE_USDC' | 'USDC_E';
+      usdcType?: 'NATIVE_USDC' | 'USDC_E' | 'PUSD';
       slippage?: number;
     } = {}
   ): Promise<SwapResult> {
-    const { usdcType = 'NATIVE_USDC', slippage = 0.5 } = options;
+    const { usdcType = 'PUSD', slippage = 0.5 } = options;
 
     const upperTokenIn = tokenIn.toUpperCase();
 
@@ -682,29 +689,28 @@ export class SwapService {
           gasUsed: '0',
         };
       }
-      // Swap USDC to USDC.e
-      return this.swap('USDC', 'USDC_E', amountIn, { slippage });
+      // Swap USDC to USDC.e or pUSD
+      return this.swap('USDC', usdcType, amountIn, { slippage });
     }
 
-    if (upperTokenIn === 'USDC_E') {
-      if (usdcType === 'USDC_E') {
+    if (upperTokenIn === 'USDC_E' || upperTokenIn === 'PUSD') {
+      if (usdcType === upperTokenIn) {
         return {
           success: true,
           transactionHash: '',
           tokenIn: upperTokenIn,
-          tokenOut: 'USDC_E',
+          tokenOut: upperTokenIn,
           amountIn,
           amountOut: amountIn,
           gasUsed: '0',
         };
       }
-      // Swap USDC.e to USDC
-      return this.swap('USDC_E', 'USDC', amountIn, { slippage });
+      // Swap between USDC.e / pUSD / native USDC
+      return this.swap(upperTokenIn, usdcType, amountIn, { slippage });
     }
 
-    // Swap other tokens to USDC
-    const targetUsdc = usdcType === 'NATIVE_USDC' ? 'USDC' : 'USDC_E';
-    return this.swap(tokenIn, targetUsdc, amountIn, { slippage });
+    // Swap other tokens to the target USDC variant (defaults to pUSD - what Polymarket trades in)
+    return this.swap(tokenIn, usdcType, amountIn, { slippage });
   }
 
   /**
@@ -734,7 +740,7 @@ export class SwapService {
     });
 
     // Get ERC20 balances
-    const tokens = ['USDC', 'USDC_E', 'USDT', 'DAI', 'WETH', 'WMATIC'];
+    const tokens = ['USDC', 'PUSD', 'USDC_E', 'USDT', 'DAI', 'WETH', 'WMATIC'];
     for (const tokenSymbol of tokens) {
       const tokenAddress = POLYGON_TOKENS[tokenSymbol as SupportedToken];
       const contract = new Contract(tokenAddress, ERC20_ABI, rpcProvider);
@@ -843,7 +849,7 @@ export class SwapService {
 
     const tx = await contract.transfer(to, amountWei, {
       ...gasOptions,
-      gasLimit: 100000, // ERC20 transfer gas limit (USDC.e needs ~71k)
+      gasLimit: 100000, // ERC20 transfer gas limit (USDC.e/pUSD need ~71k)
     });
     const receipt = await tx.wait();
 
@@ -862,10 +868,10 @@ export class SwapService {
    *
    * ⚠️ WARNING: This transfers NATIVE USDC (0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359)
    *
-   * For Polymarket CTF operations, you need USDC.e instead.
-   * Use transferUsdcE() for Polymarket CTF compatibility.
+   * For Polymarket trading/CTF operations, you need pUSD instead.
+   * Use transferPusd() for Polymarket compatibility.
    *
-   * @see transferUsdcE - For Polymarket CTF operations
+   * @see transferPusd - For Polymarket trading/CTF operations
    */
   async transferUsdc(to: string, amount: string): Promise<TransferResult> {
     return this.transfer('USDC', to, amount);
@@ -874,23 +880,32 @@ export class SwapService {
   /**
    * Transfer USDC.e (bridged USDC) to another address
    *
-   * ✅ This is the correct method for Polymarket CTF operations.
+   * ⚠️ LEGACY: Since the April 28, 2026 CLOB V2 migration, Polymarket trades
+   * in pUSD, not USDC.e. Use transferPusd() for current Polymarket operations.
+   * This method is kept only for wallets still holding pre-migration USDC.e.
    *
-   * Polymarket's Conditional Token Framework (CTF) only accepts
-   * USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174).
+   * @see transferPusd - The correct method for current Polymarket operations
+   */
+  async transferUsdcE(to: string, amount: string): Promise<TransferResult> {
+    return this.transfer('USDC_E', to, amount);
+  }
+
+  /**
+   * Transfer pUSD (Polymarket USD) to another address
    *
-   * If you're funding a wallet for CTF trading, use this method.
+   * ✅ This is the correct method for Polymarket trading/CTF operations
+   * since the April 28, 2026 CLOB V2 migration.
    *
    * @example
    * ```typescript
    * // Fund a session wallet for Polymarket trading
-   * await swapService.transferUsdcE(sessionWallet, '100');
+   * await swapService.transferPusd(sessionWallet, '100');
    *
    * // The session wallet can now perform CTF operations
    * await ctf.split(conditionId, '100');
    * ```
    */
-  async transferUsdcE(to: string, amount: string): Promise<TransferResult> {
-    return this.transfer('USDC_E', to, amount);
+  async transferPusd(to: string, amount: string): Promise<TransferResult> {
+    return this.transfer('PUSD', to, amount);
   }
 }

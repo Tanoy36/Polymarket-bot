@@ -708,6 +708,8 @@ async function updateBalances() {
     let changed = false;
 
     // Parse balances from TokenBalance array
+    let pusd: number | undefined;
+    let usdcE: number | undefined;
     for (const b of balances) {
       if (b.symbol === 'MATIC') {
         const val = parseFloat(b.balance);
@@ -717,10 +719,20 @@ async function updateBalances() {
         const val = parseFloat(b.balance);
         if (state.usdcBalance !== val) { state.usdcBalance = val; changed = true; }
       }
-      if (b.symbol === 'USDC_E') {
-        const val = parseFloat(b.balance);
-        if (state.usdcEBalance !== val) { state.usdcEBalance = val; changed = true; }
-      }
+      if (b.symbol === 'USDC_E') usdcE = parseFloat(b.balance);
+      if (b.symbol === 'PUSD') pusd = parseFloat(b.balance);
+    }
+
+    // `state.usdcEBalance` is the collateral figure the dashboard renders (as
+    // the "pUSD" card). Since the Apr 28, 2026 CLOB V2 migration the tradeable
+    // collateral is pUSD, so pUSD wins; legacy USDC.e is only a fallback for
+    // wallets that still hold nothing but unwrapped USDC.e. Note getBalances()
+    // returns USDC_E after PUSD, so assigning both in the loop above would let
+    // the legacy balance clobber the pUSD one.
+    const collateral = pusd ?? usdcE;
+    if (collateral !== undefined && state.usdcEBalance !== collateral) {
+      state.usdcEBalance = collateral;
+      changed = true;
     }
 
     if (changed) {
@@ -752,10 +764,10 @@ async function setupSwap() {
       usdce: `$${state.usdcEBalance.toFixed(2)}`,
     });
 
-    // Check for low USDC.e (Bridged) balance
+    // Check for low pUSD balance (collateral token since the Apr 28, 2026 CLOB V2 migration)
     if (!CONFIG.dryRun && state.usdcEBalance < 5) {
-      log('WARN', `⚠️ Low USDC.e balance ($${state.usdcEBalance.toFixed(2)}). Bot requires USDC.e (Bridged USDC) on Polygon.`);
-      log('WARN', `ℹ️ Please deposit USDC.e or swap your Native USDC to USDC.e manually.`);
+      log('WARN', `⚠️ Low pUSD balance ($${state.usdcEBalance.toFixed(2)}). Bot requires pUSD on Polygon.`);
+      log('WARN', `ℹ️ Please deposit pUSD, or wrap leftover USDC.e / swap Native USDC into pUSD.`);
     }
 
     // Poll balances every 30 seconds
@@ -1395,7 +1407,7 @@ async function main() {
     console.log('  BALANCES:');
     console.log(`    MATIC:        ${state.maticBalance.toFixed(4)}`);
     console.log(`    USDC:         $${state.usdcBalance.toFixed(2)}`);
-    console.log(`    USDC.e:       $${state.usdcEBalance.toFixed(2)}`);
+    console.log(`    pUSD:         $${state.usdcEBalance.toFixed(2)}`);
     console.log('─'.repeat(70));
     console.log('  STRATEGIES:');
     console.log(`    Smart Money:  ${state.smartMoneyTrades} trades | ${state.followedWallets.length} wallets`);

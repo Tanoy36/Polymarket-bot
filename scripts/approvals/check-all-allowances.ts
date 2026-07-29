@@ -23,9 +23,9 @@ if (!PRIVATE_KEY) {
 }
 
 // Contract addresses on Polygon
-const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
-const NEG_RISK_CTF_EXCHANGE = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+const PUSD_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+const CTF_EXCHANGE = '0xE111180000d2663C0091e4f400237545B87B996B';
+const NEG_RISK_CTF_EXCHANGE = '0xe2222d279d744050d28e00520010520000310F59';
 const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 
 // Additional contracts that might need approval
@@ -69,14 +69,14 @@ async function main() {
   }
   const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
   const address = wallet.address;
-  const usdc = new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, wallet);
+  const usdc = new ethers.Contract(PUSD_ADDRESS, ERC20_ABI, wallet);
 
   console.log(`Wallet: ${address}`);
   console.log('');
 
   // Check USDC balance
   const balance = await usdc.balanceOf(address);
-  console.log(`USDC.e Balance: ${(parseFloat(balance.toString()) / 1e6).toFixed(6)} USDC`);
+  console.log(`pUSD Balance: ${(parseFloat(balance.toString()) / 1e6).toFixed(6)} USDC`);
   console.log('');
 
   // Check all allowances

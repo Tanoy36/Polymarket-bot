@@ -70,7 +70,7 @@ async function main(): Promise<void> {
 
   try {
     const [allTime, weekly] = await Promise.all([
-      sdk.dataApi\.fetchLeaderboard({ limit: 5 }),
+      sdk.dataApi.fetchLeaderboard({ limit: 5 }),
       sdk.wallets.getLeaderboardByPeriod('week', 5),
     ]);
 

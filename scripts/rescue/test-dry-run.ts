@@ -7,7 +7,11 @@ import { ethers, BigNumber } from 'ethers';
 const RPC_URL = process.env.RPC_URL || 'https://polygon-rpc.com';
 const CHAIN_ID = 137;
 const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+// Post-April-28-2026 CLOB V2 migration: collateral is pUSD, not USDC.e.
+// CTF redeemPositions() must be called with the pUSD address, and wallet
+// value now sits in pUSD. If this wallet also holds leftover pre-migration
+// USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174), sweep that separately.
+const PUSD_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 const SAFE_ADDRESS = process.env.SAFE_ADDRESS || '';
 const GAS_PRICE = ethers.utils.parseUnits('500', 'gwei');  // 10x normal
 
@@ -63,10 +67,10 @@ async function main() {
     console.log(`  ${token.name}: ${ethers.utils.formatUnits(balance, 6)} 份`);
   }
 
-  // 获取 USDC.e 余额
-  const usdcContract = new ethers.Contract(USDC_E_CONTRACT, ERC20_ABI, provider);
+  // 获取 pUSD 余额
+  const usdcContract = new ethers.Contract(PUSD_CONTRACT, ERC20_ABI, provider);
   const usdcBalance = await usdcContract.balanceOf(compromisedWallet.address);
-  console.log(`  USDC.e: $${ethers.utils.formatUnits(usdcBalance, 6)}`);
+  console.log(`  pUSD: $${ethers.utils.formatUnits(usdcBalance, 6)}`);
 
   // 获取当前 nonce
   const currentNonce = await provider.getTransactionCount(compromisedWallet.address);
@@ -116,7 +120,7 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. USDC.e 转账
+  // 2. pUSD 转账
   if (usdcBalance.gt(0)) {
     const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
     const transferData = erc20Interface.encodeFunctionData('transfer', [
@@ -125,7 +129,7 @@ async function main() {
     ]);
 
     const transferTx = {
-      to: USDC_E_CONTRACT,
+      to: PUSD_CONTRACT,
       data: transferData,
       nonce: currentNonce + 1,
       gasLimit: 100000,
@@ -137,10 +141,10 @@ async function main() {
 
     try {
       const signedTransfer = await compromisedWallet.signTransaction(transferTx);
-      console.log(`\n✅ TX${currentNonce + 1} - USDC.e 转账签名成功`);
+      console.log(`\n✅ TX${currentNonce + 1} - pUSD 转账签名成功`);
       console.log(`   金额: $${ethers.utils.formatUnits(usdcBalance, 6)}`);
     } catch (e) {
-      console.error(`\n❌ USDC.e 转账签名失败: ${e instanceof Error ? e.message : e}`);
+      console.error(`\n❌ pUSD 转账签名失败: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -153,7 +157,7 @@ async function main() {
   console.log('Gas 估算:');
   console.log('='.repeat(60));
   console.log(`  ERC-1155 批量转账: 200,000 gas`);
-  console.log(`  USDC.e 转账: 100,000 gas`);
+  console.log(`  pUSD 转账: 100,000 gas`);
   console.log(`  MATIC 转账: 21,000 gas`);
   console.log(`  总计: ${totalGas.toLocaleString()} gas`);
   console.log(`\n  Gas Price: 500 gwei (10x normal)`);

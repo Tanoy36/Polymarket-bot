@@ -4,7 +4,7 @@
  * Unified SDK for Polymarket APIs
  * - Data API (positions, activity, trades, leaderboard)
  * - Gamma API (markets, events, trending)
- * - CLOB API (orderbook, market info, trading)
+ * - CLOB API (orderbook, market info, trading) - now backed by CLOB V2
  * - Services (WalletService, MarketService)
  */
 
@@ -231,7 +231,7 @@ export type {
   BinanceKLineOptions,
 } from './services/binance-service.js';
 
-// TradingService - Unified trading and market data
+// TradingService - Unified trading and market data (CLOB V2)
 export {
   TradingService,
   POLYGON_MAINNET,
@@ -242,6 +242,7 @@ export {
 } from './services/trading-service.js';
 export type {
   TradingServiceConfig,
+  PolymarketSignatureType,
   // Order types - Side and OrderType are re-exported from core/types.ts via trading-service.ts
   // They are also exported via `export * from './core/types.js'` above
   ApiCredentials,
@@ -270,15 +271,23 @@ export type {
 // TradingService provides all trading functionality with proper type exports
 
 // CTF (Conditional Token Framework)
-// NOTE: USDC_CONTRACT is USDC.e (bridged), required for Polymarket CTF
-// NATIVE_USDC_CONTRACT is native USDC, NOT compatible with CTF
+// NOTE: Since the April 28, 2026 CLOB V2 migration, USDC_CONTRACT points at
+// pUSD (Polymarket USD) - the collateral token Polymarket now trades and
+// settles in. The name is kept for backward compatibility; use PUSD_CONTRACT
+// for clarity in new code. LEGACY_USDCE_CONTRACT is the pre-migration USDC.e
+// address, kept only to detect/migrate leftover balances via the
+// CollateralOnramp contract.
 export {
   CTFClient,
   CTF_CONTRACT,
-  USDC_CONTRACT,           // USDC.e (0x2791...) - Required for CTF
-  NATIVE_USDC_CONTRACT,    // Native USDC (0x3c49...) - NOT for CTF
-  NEG_RISK_CTF_EXCHANGE,
+  CTF_EXCHANGE,         // V2 Standard Exchange address
+  NEG_RISK_CTF_EXCHANGE, // V2 Neg Risk Exchange address
   NEG_RISK_ADAPTER,
+  USDC_CONTRACT,           // Now pUSD (0xC011a7...) - required for CTF/CLOB
+  PUSD_CONTRACT,           // Explicit pUSD alias - same value as USDC_CONTRACT
+  LEGACY_USDCE_CONTRACT,   // Pre-migration USDC.e (0x2791...) - for migration only
+  NATIVE_USDC_CONTRACT,    // Native USDC (0x3c49...) - NOT for CTF
+  COLLATERAL_ONRAMP_CONTRACT, // Wraps USDC.e -> pUSD
   USDC_DECIMALS,
   calculateConditionId,
   parseUsdc,
@@ -384,7 +393,7 @@ import { GammaApiClient } from './clients/gamma-api.js';
 import { SubgraphClient } from './clients/subgraph.js';
 import { WalletService } from './services/wallet-service.js';
 import { MarketService } from './services/market-service.js';
-import { TradingService } from './services/trading-service.js';
+import { TradingService, type PolymarketSignatureType } from './services/trading-service.js';
 import { RealtimeServiceV2 } from './services/realtime-service-v2.js';
 import { SmartMoneyService } from './services/smart-money-service.js';
 import { BinanceService } from './services/binance-service.js';
@@ -393,7 +402,23 @@ import type { UnifiedMarket, ProcessedOrderbook, ArbitrageOpportunity, KLineInte
 import { createUnifiedCache, type UnifiedCache } from './core/unified-cache.js';
 
 // Re-export for backward compatibility
-export interface PolymarketSDKConfig extends PolySDKOptions {}
+export interface PolymarketSDKConfig extends PolySDKOptions {
+  /**
+   * Address that funds/holds the trade (Deposit Wallet / Proxy / Safe address).
+   * Optional and additive - omit for the previous behavior (signer trades
+   * directly as an EOA). Forwarded to TradingService. See FUNDER_ADDRESS.
+   */
+  funderAddress?: string;
+  /**
+   * Signature type matching funderAddress's wallet type. Only meaningful when
+   * funderAddress is set. See SIGNATURE_TYPE. Defaults to 0 (EOA).
+   */
+  signatureType?: PolymarketSignatureType;
+  /**
+   * Optional builder code (V2 builder attribution). See POLY_BUILDER_CODE.
+   */
+  builderCode?: string;
+}
 
 export class PolymarketSDK {
   // Infrastructure
@@ -434,6 +459,12 @@ export class PolymarketSDK {
       privateKey,
       chainId: config.chainId,
       credentials: config.creds,
+      // Additive CLOB V2 options - omitted unless explicitly configured, so
+      // behavior is unchanged for every existing .env/config (signer trades
+      // directly, signatureType 0, no builder attribution).
+      funderAddress: config.funderAddress,
+      signatureType: config.signatureType,
+      builderCode: config.builderCode,
     });
 
     this.subgraph = new SubgraphClient(this.rateLimiter, this.cache);

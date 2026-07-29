@@ -21,14 +21,18 @@ const CHAIN_ID = 137;
 
 // 合约地址
 const CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+// Post-April-28-2026 CLOB V2 migration: collateral is pUSD, not USDC.e.
+// CTF redeemPositions() must be called with the pUSD address, and wallet
+// value now sits in pUSD. If this wallet also holds leftover pre-migration
+// USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174), sweep that separately.
+const PUSD_CONTRACT = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 
 // 目标地址（救回资金的去向）- 必须通过环境变量设置
 const SAFE_ADDRESS = process.env.SAFE_ADDRESS || '';
 
 // Gas 价格策略
 const HIGH_GAS_PRICE = ethers.utils.parseUnits('200000', 'gwei');  // 200k gwei for POL competition
-const MEDIUM_GAS_PRICE = ethers.utils.parseUnits('5000', 'gwei');   // 5k gwei for USDC.e transfer
+const MEDIUM_GAS_PRICE = ethers.utils.parseUnits('5000', 'gwei');   // 5k gwei for pUSD transfer
 
 // 需要赎回的 positions
 const POSITIONS = [
@@ -168,7 +172,7 @@ async function main() {
     const indexSets = position.outcome === 'Up' ? [1] : [2];
 
     const redeemData = ctfInterface.encodeFunctionData('redeemPositions', [
-      USDC_E_CONTRACT,
+      PUSD_CONTRACT,
       ethers.constants.HashZero,
       position.conditionId,
       indexSets,
@@ -191,13 +195,13 @@ async function main() {
     nonce++;
   }
 
-  // 签名 USDC.e 转账交易
-  console.log(`\n签名 USDC.e 转账到 ${SAFE_ADDRESS}`);
+  // 签名 pUSD 转账交易
+  console.log(`\n签名 pUSD 转账到 ${SAFE_ADDRESS}`);
 
   const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
   // 转账最大值 (实际会根据余额)
   const usdcBalance = await getUsdcBalance(provider, compromisedWallet.address);
-  console.log(`  当前 USDC.e 余额: ${usdcBalance}`);
+  console.log(`  当前 pUSD 余额: ${usdcBalance}`);
 
   const transferData = erc20Interface.encodeFunctionData('transfer', [
     SAFE_ADDRESS,
@@ -205,7 +209,7 @@ async function main() {
   ]);
 
   const transferTx = {
-    to: USDC_E_CONTRACT,
+    to: PUSD_CONTRACT,
     data: transferData,
     nonce: nonce,
     gasLimit: 100000,
@@ -217,7 +221,7 @@ async function main() {
 
   const signedTransfer = await compromisedWallet.signTransaction(transferTx);
   signedTransactions.push(signedTransfer);
-  console.log(`  TX${nonce}: USDC.e 转账已签名`);
+  console.log(`  TX${nonce}: pUSD 转账已签名`);
   nonce++;
 
   // 签名 MATIC 转出交易 (清空剩余)
@@ -316,7 +320,7 @@ async function main() {
 
     // 检查最终余额
     const finalUsdcBalance = await getUsdcBalance(provider, SAFE_ADDRESS);
-    console.log(`\n安全地址 USDC.e 余额: ${finalUsdcBalance}`);
+    console.log(`\n安全地址 pUSD 余额: ${finalUsdcBalance}`);
 
   } catch (error) {
     console.error('\n救援失败:', error);
@@ -337,7 +341,7 @@ async function estimateRequiredGas(provider: ethers.providers.Provider, address:
 }
 
 async function getUsdcBalance(provider: ethers.providers.Provider, address: string): Promise<string> {
-  const contract = new ethers.Contract(USDC_E_CONTRACT, ERC20_ABI, provider);
+  const contract = new ethers.Contract(PUSD_CONTRACT, ERC20_ABI, provider);
   const balance = await contract.balanceOf(address);
   return ethers.utils.formatUnits(balance, 6);
 }
