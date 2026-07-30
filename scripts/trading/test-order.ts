@@ -9,7 +9,6 @@
  */
 
 import {
-  PolymarketSDK,
   TradingService,
   MarketService,
   GammaApiClient,
@@ -60,11 +59,21 @@ interface TestMarket {
 
 const TEST_AMOUNT = 5; // 5 USDC 测试 (Polymarket 最小订单量是 5 份)
 
-/** Find an active market that is accepting orders and has a real orderbook. */
-async function findLiveMarket(sdk: PolymarketSDK): Promise<TestMarket | null> {
-  // Keep this small: each candidate costs two rate-limited API calls, so a
-  // large list makes the script feel hung before it places anything.
-  const candidates = await sdk.gammaApi.getMarkets({
+/**
+ * Find an active market that is accepting orders and has a real orderbook.
+ *
+ * Takes the plain API clients rather than a full PolymarketSDK: constructing
+ * the SDK opens realtime WebSockets, whose reconnect timers keep the Node
+ * process alive after the script finishes its work, so the script appears to
+ * hang once the orders are done.
+ */
+async function findLiveMarket(
+  gammaApi: GammaApiClient,
+  marketService: MarketService
+): Promise<TestMarket | null> {
+  // Keep this small: each candidate costs two API calls, so a large list makes
+  // the script feel slow before it places anything.
+  const candidates = await gammaApi.getMarkets({
     limit: 12,
     active: true,
     closed: false,
@@ -76,12 +85,19 @@ async function findLiveMarket(sdk: PolymarketSDK): Promise<TestMarket | null> {
     const conditionId = (g as unknown as { conditionId?: string }).conditionId;
     if (!conditionId) continue;
     try {
-      const m = await sdk.markets.getClobMarket(conditionId);
+      const m = await marketService.getClobMarket(conditionId);
       if (!m?.acceptingOrders || m.closed || m.tokens.length < 2) continue;
 
-      const book = await sdk.markets.getProcessedOrderbook(conditionId);
+      const book = await marketService.getProcessedOrderbook(conditionId);
       // Need a two-sided book to price a resting order sensibly.
       if (!(book.yes.bid > 0) || !(book.yes.ask > 0)) continue;
+
+      // Require a mid-range, reasonably tight book. Penny markets (e.g. a
+      // 0.003/0.009 book) leave no room to rest an order below the bid without
+      // hitting the 0.01 tick floor - which would price the "safe" test order
+      // ABOVE the ask and fill it immediately as a taker.
+      if (book.yes.bid < 0.10 || book.yes.bid > 0.90) continue;
+      if (book.yes.ask - book.yes.bid > 0.10) continue;
 
       return {
         name: m.question ?? g.question ?? 'unknown',
@@ -126,16 +142,16 @@ async function main() {
   console.log('');
 
   // 获取当前市场价格 (orderbook 数据在 MarketService 上, 按 conditionId 查询)
+  const gammaApi = new GammaApiClient(rateLimiter, cache);
   const marketService = new MarketService(
-    new GammaApiClient(rateLimiter, cache),
+    gammaApi,
     new DataApiClient(rateLimiter, cache),
     rateLimiter,
     cache,
     { chainId: 137 }
   );
-  const sdk = await PolymarketSDK.create({ chainId: 137 });
   console.log('Finding a live market that is accepting orders...');
-  const TEST_MARKET = await findLiveMarket(sdk);
+  const TEST_MARKET = await findLiveMarket(gammaApi, marketService);
   if (!TEST_MARKET) {
     console.error('No live market with a two-sided orderbook found - aborting.');
     process.exit(1);
@@ -168,8 +184,19 @@ async function main() {
   const gtcBuyPrice = Math.max(0.01, bestBid - 0.05); // 低于最佳买价 5 cents
   const gtcSize = 5;
 
+  // Refuse to send an order that would cross the book. The clamp above pins the
+  // price at the 0.01 tick floor on low-priced markets, which can land at or
+  // above the ask - the order would fill instantly instead of resting, turning
+  // a cancellable test into a real position.
+  if (gtcBuyPrice >= bestBid || gtcBuyPrice >= bestAsk) {
+    console.error(`Refusing to place: computed price $${gtcBuyPrice.toFixed(3)} is not below the book (bid $${bestBid.toFixed(3)} / ask $${bestAsk.toFixed(3)}).`);
+    console.error('This order would fill immediately rather than rest. Aborting.');
+    process.exit(1);
+  }
+
   console.log(`Placing GTC BUY order: ${gtcSize.toFixed(2)} shares @ $${gtcBuyPrice.toFixed(3)}`);
   console.log(`Expected cost: $${(gtcSize * gtcBuyPrice).toFixed(2)}`);
+  console.log(`(resting $${(bestBid - gtcBuyPrice).toFixed(3)} below best bid - should not fill)`);
 
   try {
     const gtcResult = await tradingService.createLimitOrder({
