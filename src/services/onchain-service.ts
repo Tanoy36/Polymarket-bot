@@ -146,7 +146,7 @@ export class OnchainService {
   private swapService: SwapService;
 
   constructor(config: OnchainServiceConfig) {
-    const rpcUrl = config.rpcUrl || 'https://polygon-rpc.com';
+    const rpcUrl = config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com';
 
     // Create shared provider and wallet
     this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);

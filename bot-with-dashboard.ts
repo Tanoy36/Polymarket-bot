@@ -686,6 +686,7 @@ async function setupDipArb(sdk: PolymarketSDK) {
 }
 
 let swapService: SwapService | null = null;
+let balanceFetchFailures = 0;
 
 async function updateBalances() {
   if (CONFIG.dryRun) {
@@ -741,7 +742,15 @@ async function updateBalances() {
       // log('SWAP', 'Balances updated');
     }
   } catch (err) {
-    // Silent fail on interval to avoid log spam
+    // Don't spam the log on every interval tick, but never fail completely
+    // silently: a dead RPC here means the dashboard keeps rendering whatever
+    // balances it last had (in LIVE mode, that can be the dry-run paper
+    // figures), which looks like "real balances aren't loading".
+    balanceFetchFailures++;
+    if (balanceFetchFailures === 1 || balanceFetchFailures % 20 === 0) {
+      log('WARN', `⚠️ Failed to fetch on-chain balances (attempt ${balanceFetchFailures}): ${err instanceof Error ? err.message : String(err)}`);
+      log('WARN', `ℹ️ Displayed balances may be stale. Check your RPC - override it with POLYGON_RPC_URL in .env.`);
+    }
   }
 }
 
@@ -752,7 +761,7 @@ async function setupSwap() {
     if (!process.env.POLYMARKET_PRIVATE_KEY) return;
 
     // Create SwapService with signer
-    const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+    const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com');
     const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
     swapService = new SwapService(signer);
 
@@ -788,7 +797,7 @@ async function setupOnchain() {
 
     const onchain = new OnchainService({
       privateKey: process.env.POLYMARKET_PRIVATE_KEY,
-      rpcUrl: 'https://polygon-rpc.com',
+      rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com',
     });
 
     if (CONFIG.onchain.autoApprove) {
@@ -1079,6 +1088,18 @@ async function main() {
         // Wait, usually toggles send the new desired state. 
         // Using "enabled" as "isDryRun enabled"
         CONFIG.dryRun = !!enable;
+
+        // Leaving DRY RUN: the displayed balances are simulated (10,000 paper
+        // pUSD / 100 MATIC). Clear them immediately and refetch from chain so
+        // LIVE mode can never render paper figures as if they were real funds.
+        if (!CONFIG.dryRun) {
+          state.usdcEBalance = 0;
+          state.usdcBalance = 0;
+          state.maticBalance = 0;
+          balanceFetchFailures = 0;
+          updateDashboard();
+          await updateBalances();
+        }
 
         // Update State paper wallet
         if (CONFIG.dryRun && !state.paper) {

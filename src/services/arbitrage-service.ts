@@ -296,7 +296,7 @@ export class ArbitrageService extends EventEmitter {
 
     this.config = {
       privateKey: config.privateKey,
-      rpcUrl: config.rpcUrl || 'https://polygon-rpc.com',
+      rpcUrl: config.rpcUrl || process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com',
       profitThreshold: config.profitThreshold ?? 0.005,
       minTradeSize: config.minTradeSize ?? 5,
       maxTradeSize: config.maxTradeSize ?? 100,

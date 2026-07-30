@@ -139,7 +139,7 @@ export const SUPPORTED_CHAINS = {
   POLYGON: {
     chainId: 137,
     name: 'Polygon',
-    rpcUrl: 'https://polygon-rpc.com',
+    rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com',
   },
 } as const;
 
