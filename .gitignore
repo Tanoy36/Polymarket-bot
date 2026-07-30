@@ -32,3 +32,9 @@ coverage/
 .cache/
 *.tsbuildinfo
 .mcp.json
+# Local scratch/probe scripts
+.pre*.ts
+.probe*.ts
+.verify*.ts
+.diag.ts
+.cap.cjs
