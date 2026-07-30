@@ -75,7 +75,13 @@ let CONFIG = {
     checkLastNTrades: 10,  // Analyze last 10 trades
 
     sizeScale: 0.1,
-    maxSizePerTrade: 15,  // Up from 10
+    // Hard ceiling per copied trade, in pUSD. The live copier additionally
+    // caps every order at `maxWalletFraction` of the CURRENT on-chain pUSD
+    // balance, so a small wallet is never asked to place an order it cannot
+    // fund. Raise this once the wallet is funded beyond a few dollars.
+    maxSizePerTrade: 2.5,
+    /** Never commit more than this fraction of the live pUSD balance to one copy. */
+    maxWalletFraction: 0.5,
     maxSlippage: 0.03,
     minTradeSize: 10,  // Up from 5
     delay: 500,
@@ -103,7 +109,10 @@ let CONFIG = {
   dipArb: {
     enabled: process.env.DIPARB_ENABLED === 'true',
     coins: ['BTC', 'ETH', 'SOL'] as const,
-    shares: 10,
+    // 5 shares/leg keeps a full two-leg round at ~$4.60 when the sum hits the
+    // 0.92 target, which fits a ~$5 pUSD balance. 10 shares needs ~$9.20.
+    // 5 is also Polymarket's minimum order size, so don't go lower.
+    shares: 5,
     sumTarget: 0.92,
     autoRotate: true,
     autoExecute: true,
@@ -356,6 +365,89 @@ function simulateTrade(profit: number, strategy: string, description: string) {
 // ============================================================================
 
 let arbService: ArbitrageService | null = null;
+/**
+ * Live smart-money copy execution.
+ *
+ * This is the real order path for the Smart Money strategy - previously this
+ * branch was an empty placeholder, so the bot detected signals, counted them
+ * on the dashboard, and never copied anything in LIVE mode.
+ *
+ * Sizing is deliberately balance-aware rather than driven by
+ * `risk.maxPerTradePct`: on a small wallet the percentage rule produces orders
+ * far below Polymarket's minimums, so every copy would be rejected. Instead an
+ * order is clamped by, in order: the whale's size x sizeScale, the configured
+ * maxSizePerTrade, and a fraction of the CURRENT on-chain pUSD balance. If the
+ * result cannot clear Polymarket's minimums ($1 value AND 5 shares) the copy is
+ * skipped with a reason rather than being sent to fail.
+ */
+async function executeSmartMoneyCopy(sdk: PolymarketSDK, trade: SmartMoneyTrade): Promise<void> {
+  const cfg = CONFIG.smartMoney;
+
+  const tokenId = trade.tokenId;
+  if (!tokenId) {
+    log('WARN', `Copy skipped: signal has no tokenId (${trade.marketSlug ?? 'unknown market'})`);
+    return;
+  }
+  if (!(trade.price > 0)) {
+    log('WARN', `Copy skipped: invalid price ${trade.price}`);
+    return;
+  }
+
+  // Available collateral: state.usdcEBalance holds the live pUSD balance.
+  // Keep a small buffer so a partial fill or price drift can't overdraw.
+  const available = Math.max(0, state.usdcEBalance * 0.98);
+
+  // Proportional copy, then clamp to the configured and wallet-derived ceilings.
+  let value = trade.size * trade.price * cfg.sizeScale;
+  value = Math.min(value, cfg.maxSizePerTrade, available * cfg.maxWalletFraction);
+
+  const shares = value / trade.price;
+
+  // Polymarket rejects below $1 notional or 5 shares - check before sending.
+  if (value < 1) {
+    log('INFO', `Copy skipped: size $${value.toFixed(2)} below $1 minimum (balance $${state.usdcEBalance.toFixed(2)})`);
+    return;
+  }
+  if (shares < 5) {
+    log('INFO', `Copy skipped: ${shares.toFixed(1)} shares below Polymarket's 5-share minimum at price ${trade.price.toFixed(3)} (needs $${(5 * trade.price).toFixed(2)})`);
+    return;
+  }
+  if (value > available) {
+    log('WARN', `Copy skipped: needs $${value.toFixed(2)} but only $${available.toFixed(2)} pUSD available`);
+    return;
+  }
+
+  // Cross the spread by maxSlippage so a FOK order can actually fill.
+  const limitPrice = trade.side === 'BUY'
+    ? Math.min(0.999, trade.price * (1 + cfg.maxSlippage))
+    : Math.max(0.001, trade.price * (1 - cfg.maxSlippage));
+
+  if (cfg.delay > 0) await new Promise(r => setTimeout(r, cfg.delay));
+
+  log('TRADE', `Copying ${trade.side} ${shares.toFixed(1)} shares @ ~${limitPrice.toFixed(3)} ($${value.toFixed(2)}) from ${trade.traderAddress.slice(0, 10)}...`);
+
+  try {
+    const result = await sdk.tradingService.createMarketOrder({
+      tokenId,
+      side: trade.side,
+      amount: value,
+      price: limitPrice,
+      orderType: 'FOK',
+    });
+
+    if (result.success) {
+      state.smartMoneyTrades++;
+      recordTrade(0, 'smartMoney'); // PnL is realised later, on exit
+      log('TRADE', `✅ Copied ${trade.side} ${trade.marketSlug?.slice(0, 40) ?? ''} | order ${result.orderId ?? 'n/a'}`);
+      await updateBalances();
+    } else {
+      log('ERROR', `❌ Copy failed: ${result.errorMsg ?? 'unknown error'}`);
+    }
+  } catch (err) {
+    log('ERROR', `❌ Copy threw: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 let isSmartMoneyInitialized = false;
 let isSmartMoneyInitializing = false;
 
@@ -425,7 +517,16 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
         // Add to smart money signals for dashboard
         const signal: SmartMoneySignal = {
           id: `sm-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          timestamp: new Date().toISOString(),
+          // Use the whale trade's own timestamp, not ingestion time - a burst of
+          // signals arriving together previously all rendered with the same
+          // clock time, which made the feed look frozen. The activity feed
+          // reports Unix seconds while other endpoints use milliseconds, so
+          // normalise the same way the rest of the codebase does (< 1e12 = seconds).
+          timestamp: new Date(
+            trade.timestamp
+              ? (trade.timestamp < 1e12 ? trade.timestamp * 1000 : trade.timestamp)
+              : Date.now()
+          ).toISOString(),
           wallet: trade.traderAddress,
           market: trade.marketSlug || 'Unknown',
           side: trade.side as 'BUY' | 'SELL',
@@ -450,9 +551,7 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
           // ... execution
           simulateTrade(0, 'smartMoney', `Smart Money Copy: ${trade.side} ${trade.size} shares @ ${trade.price}`);
         } else {
-          // ... live execution
-          // simplified placeholder from original file
-          // ...
+          await executeSmartMoneyCopy(sdk, trade);
         }
       });
   }

@@ -118,7 +118,10 @@ const CONFIG = {
   dipArb: {
     enabled: true,
     coins: ['BTC', 'ETH', 'SOL'] as const,
-    shares: 10,
+    // Kept in sync with bot-with-dashboard.ts: 5 shares/leg puts a full round
+    // at ~$4.60 on target, fitting a ~$5 pUSD balance. 5 is also Polymarket's
+    // minimum order size, so don't go lower.
+    shares: 5,
     sumTarget: 0.92,
     autoRotate: true,
     // 🔴 NEW: Minimum trade value enforcement
