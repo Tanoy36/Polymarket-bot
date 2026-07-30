@@ -9,6 +9,7 @@
  */
 
 import {
+  PolymarketSDK,
   TradingService,
   MarketService,
   GammaApiClient,
@@ -43,15 +44,57 @@ function readKeyFromEnvFile(): string {
 const PRIVATE_KEY =
   process.env.POLY_PRIVKEY || process.env.POLYMARKET_PRIVATE_KEY || readKeyFromEnvFile();
 
-// 使用一个活跃的市场进行测试 - NVIDIA market cap
-const TEST_MARKET = {
-  name: 'NVIDIA largest company by market cap on Dec 31',
-  conditionId: '0x0b16eb7741855ca3d4383fabb8b760c897c2165d603916497f484b87ba9826dc',
-  yesTokenId: '94850533403292240972948844256810904078895883844462287088135166537739765648754',
-  noTokenId: '69263280792958981516606123639467754139758192236863611059536531765186180114584',
-};
+// The market to test against is discovered at runtime.
+//
+// This used to be a hardcoded NVIDIA market that resolved on 2025-12-31. Once
+// it closed, its orderbook was empty, so the script read a 0.000/1.000 price,
+// priced a GTC order at $0.01 x 500 shares, and reported "no match" on the FOK
+// leg - all of which looked like a wallet/auth failure but was only a dead
+// market. Always resolve a live, order-accepting market instead.
+interface TestMarket {
+  name: string;
+  conditionId: string;
+  yesTokenId: string;
+  noTokenId: string;
+}
 
 const TEST_AMOUNT = 5; // 5 USDC 测试 (Polymarket 最小订单量是 5 份)
+
+/** Find an active market that is accepting orders and has a real orderbook. */
+async function findLiveMarket(sdk: PolymarketSDK): Promise<TestMarket | null> {
+  // Keep this small: each candidate costs two rate-limited API calls, so a
+  // large list makes the script feel hung before it places anything.
+  const candidates = await sdk.gammaApi.getMarkets({
+    limit: 12,
+    active: true,
+    closed: false,
+    order: 'volume24hr',
+    ascending: false,
+  });
+
+  for (const g of candidates) {
+    const conditionId = (g as unknown as { conditionId?: string }).conditionId;
+    if (!conditionId) continue;
+    try {
+      const m = await sdk.markets.getClobMarket(conditionId);
+      if (!m?.acceptingOrders || m.closed || m.tokens.length < 2) continue;
+
+      const book = await sdk.markets.getProcessedOrderbook(conditionId);
+      // Need a two-sided book to price a resting order sensibly.
+      if (!(book.yes.bid > 0) || !(book.yes.ask > 0)) continue;
+
+      return {
+        name: m.question ?? g.question ?? 'unknown',
+        conditionId,
+        yesTokenId: m.tokens[0].tokenId,
+        noTokenId: m.tokens[1].tokenId,
+      };
+    } catch {
+      // Market lookup or book fetch failed - try the next candidate.
+    }
+  }
+  return null;
+}
 
 async function main() {
   if (!PRIVATE_KEY) {
@@ -63,7 +106,6 @@ async function main() {
   console.log('║       ORDER TYPE TEST - GTC vs FOK                              ║');
   console.log('╚════════════════════════════════════════════════════════════════╝');
   console.log('');
-  console.log(`Market: ${TEST_MARKET.name}`);
   console.log(`Test Amount: $${TEST_AMOUNT} USDC`);
   console.log('');
 
@@ -91,10 +133,25 @@ async function main() {
     cache,
     { chainId: 137 }
   );
+  const sdk = await PolymarketSDK.create({ chainId: 137 });
+  console.log('Finding a live market that is accepting orders...');
+  const TEST_MARKET = await findLiveMarket(sdk);
+  if (!TEST_MARKET) {
+    console.error('No live market with a two-sided orderbook found - aborting.');
+    process.exit(1);
+  }
+  console.log(`Market: ${TEST_MARKET.name}`);
+  console.log(`  conditionId: ${TEST_MARKET.conditionId}`);
+  console.log('');
+
   const orderbook = await marketService.getProcessedOrderbook(TEST_MARKET.conditionId);
   const bestBid = orderbook.yes.bid || 0;
   const bestAsk = orderbook.yes.ask || 1;
   console.log(`Current YES price: ${bestBid.toFixed(3)} / ${bestAsk.toFixed(3)}`);
+  if (!(bestBid > 0)) {
+    console.error('Orderbook has no bids - aborting rather than pricing off an empty book.');
+    process.exit(1);
+  }
   console.log('');
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -105,8 +162,11 @@ async function main() {
   console.log('═══════════════════════════════════════════════════════════════');
 
   // 尝试以低于市价的价格买入 (maker order)
+  // Exactly 5 shares - Polymarket's minimum order size. Sizing this by
+  // TEST_AMOUNT/price would commit the whole test budget to a resting order
+  // for no extra diagnostic value; 5 shares proves the same round-trip.
   const gtcBuyPrice = Math.max(0.01, bestBid - 0.05); // 低于最佳买价 5 cents
-  const gtcSize = Math.max(5, TEST_AMOUNT / gtcBuyPrice); // 最小 5 份
+  const gtcSize = 5;
 
   console.log(`Placing GTC BUY order: ${gtcSize.toFixed(2)} shares @ $${gtcBuyPrice.toFixed(3)}`);
   console.log(`Expected cost: $${(gtcSize * gtcBuyPrice).toFixed(2)}`);
@@ -129,7 +189,10 @@ async function main() {
       const cancelResult = await tradingService.cancelOrder(gtcResult.orderId!);
       console.log(`   Cancel: ${cancelResult.success ? '✓' : '✗'}`);
     } else {
-      console.log(`❌ GTC Order FAILED: ${gtcResult.errorMsg}`);
+      // errorMsg is sometimes absent on a rejection - dump the whole response
+      // so the failure is diagnosable instead of printing "undefined".
+      console.log(`❌ GTC Order FAILED: ${gtcResult.errorMsg ?? '(no errorMsg)'}`);
+      console.log(`   full response: ${JSON.stringify(gtcResult)}`);
     }
   } catch (error: any) {
     console.log(`❌ GTC Order ERROR: ${error.message}`);
@@ -140,6 +203,19 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════════════════
   // TEST 2: FOK Market Order (这是套利脚本使用的方式)
   // ═══════════════════════════════════════════════════════════════════════════
+  // A FOK market order fills IMMEDIATELY and spends real funds - unlike the GTC
+  // leg above, it cannot be cancelled. Opt in explicitly with --fok.
+  if (!process.argv.includes('--fok')) {
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('TEST 2: FOK Market Order - SKIPPED');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log(`This leg spends $${TEST_AMOUNT} of real funds and fills instantly.`);
+    console.log('Re-run with --fok to include it:');
+    console.log('  npx tsx scripts/trading/test-order.ts --fok');
+    console.log('');
+    return;
+  }
+
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('TEST 2: FOK Market Order (套利脚本方式)');
   console.log('═══════════════════════════════════════════════════════════════');
