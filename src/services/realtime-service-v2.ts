@@ -14,6 +14,7 @@
  */
 
 import { EventEmitter } from 'events';
+import WebSocket from 'isomorphic-ws';
 import {
   RealTimeDataClient,
   type Message,
@@ -21,6 +22,24 @@ import {
   ConnectionStatus,
 } from '@polymarket/real-time-data-client';
 import type { PriceUpdate, BookUpdate, Orderbook, OrderbookLevel } from '../core/types.js';
+
+/**
+ * CLOB market-data WebSocket endpoint.
+ *
+ * The live-data host (wss://ws-live-data.polymarket.com) stopped serving
+ * `clob_market` topics after the April 28, 2026 CLOB V2 migration - it now
+ * answers those subscriptions with:
+ *   {"body":{"message":"CLOB messages are not supported anymore..."},"statusCode":400}
+ * which left orderbook-driven strategies (DipArb, Arbitrage) with an empty
+ * book and prices stuck at 0.
+ *
+ * Orderbook/price/trade data now comes from the CLOB subscriptions host, which
+ * uses its own message format (see handleClobMessage). Everything that is not
+ * `clob_market` (crypto prices, activity, comments) still runs over
+ * RealTimeDataClient against the live-data host.
+ */
+const CLOB_WS_URL =
+  process.env.POLYMARKET_CLOB_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
 // ============================================================================
 // Types
@@ -267,6 +286,12 @@ export class RealtimeServiceV2 extends EventEmitter {
   private bookCache: Map<string, OrderbookSnapshot> = new Map();
   private lastTradeCache: Map<string, LastTradeInfo> = new Map();
 
+  // CLOB market-data socket (orderbook / price_change / last_trade_price)
+  private clobWs: WebSocket | null = null;
+  private clobAssetIds: Set<string> = new Set();
+  private clobReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private clobClosedByUs = false;
+
   constructor(config: RealtimeServiceConfig = {}) {
     super();
     this.config = {
@@ -305,6 +330,7 @@ export class RealtimeServiceV2 extends EventEmitter {
    * Disconnect from WebSocket server
    */
   disconnect(): void {
+    this.closeClobSocket();
     if (this.client) {
       this.client.disconnect();
       this.client = null;
@@ -334,7 +360,9 @@ export class RealtimeServiceV2 extends EventEmitter {
     const subId = `market_${++this.subscriptionIdCounter}`;
     const filterStr = JSON.stringify(tokenIds);
 
-    // Subscribe to all market data types
+    // Market data (orderbook / price_change / last_trade_price) comes from the
+    // CLOB subscriptions host - the live-data host rejects `clob_market` topics
+    // since the CLOB V2 migration. See CLOB_WS_URL above.
     const subscriptions = [
       { topic: 'clob_market', type: 'agg_orderbook', filters: filterStr },
       { topic: 'clob_market', type: 'price_change', filters: filterStr },
@@ -342,9 +370,7 @@ export class RealtimeServiceV2 extends EventEmitter {
       { topic: 'clob_market', type: 'tick_size_change', filters: filterStr },
     ];
 
-    const subMsg = { subscriptions };
-    this.sendSubscription(subMsg);
-    this.subscriptionMessages.set(subId, subMsg);  // Store for reconnection
+    this.subscribeClobAssets(tokenIds);
 
     // Register handlers
     const orderbookHandler = (book: OrderbookSnapshot) => {
@@ -386,7 +412,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('priceChange', priceChangeHandler);
         this.off('lastTrade', lastTradeHandler);
         this.off('tickSizeChange', tickSizeHandler);
-        this.sendUnsubscription({ subscriptions });
+        for (const id of tokenIds) this.clobAssetIds.delete(id);
         this.subscriptions.delete(subId);
         this.subscriptionMessages.delete(subId);  // Remove from reconnection list
       },
@@ -1222,6 +1248,230 @@ export class RealtimeServiceV2 extends EventEmitter {
       spread,
       timestamp: book.timestamp,
     };
+  }
+
+  // ============================================================================
+  // CLOB market-data socket
+  // ============================================================================
+
+  /**
+   * Register token IDs with the CLOB market socket, connecting if needed.
+   * The CLOB host takes the full asset list per subscribe message, so adding
+   * tokens means resending the whole set.
+   */
+  private subscribeClobAssets(tokenIds: string[]): void {
+    let added = false;
+    for (const id of tokenIds) {
+      if (!this.clobAssetIds.has(id)) {
+        this.clobAssetIds.add(id);
+        added = true;
+      }
+    }
+
+    if (!this.clobWs) {
+      this.openClobSocket();
+      return;
+    }
+    if (added && this.clobWs.readyState === WebSocket.OPEN) {
+      this.sendClobSubscription();
+    }
+  }
+
+  private sendClobSubscription(): void {
+    if (!this.clobWs || this.clobWs.readyState !== WebSocket.OPEN) return;
+    if (this.clobAssetIds.size === 0) return;
+    this.clobWs.send(
+      JSON.stringify({ assets_ids: [...this.clobAssetIds], type: 'market' })
+    );
+    this.log(`CLOB socket: subscribed to ${this.clobAssetIds.size} asset(s)`);
+  }
+
+  private openClobSocket(): void {
+    if (this.clobWs) return;
+    this.clobClosedByUs = false;
+    this.log(`CLOB socket: connecting to ${CLOB_WS_URL}`);
+
+    const ws = new WebSocket(CLOB_WS_URL);
+    this.clobWs = ws;
+
+    ws.onopen = () => {
+      this.log('CLOB socket: connected');
+      this.sendClobSubscription();
+    };
+
+    ws.onmessage = (event: { data: unknown }) => {
+      const data = typeof event.data === 'string' ? event.data : String(event.data);
+      // The host sends bare "PONG" keepalives alongside JSON payloads.
+      if (!data || data[0] !== '[' && data[0] !== '{') return;
+      try {
+        this.handleClobMessage(JSON.parse(data));
+      } catch (err) {
+        this.log(`CLOB socket: failed to handle message - ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    ws.onerror = (event: unknown) => {
+      const message = (event as { message?: string })?.message ?? 'unknown error';
+      this.log(`CLOB socket: error - ${message}`);
+      this.emit('error', new Error(`CLOB socket: ${message}`));
+    };
+
+    ws.onclose = () => {
+      this.log('CLOB socket: closed');
+      this.clobWs = null;
+      if (!this.clobClosedByUs && this.config.autoReconnect && this.clobAssetIds.size > 0) {
+        if (this.clobReconnectTimer) clearTimeout(this.clobReconnectTimer);
+        this.clobReconnectTimer = setTimeout(() => this.openClobSocket(), 2000);
+      }
+    };
+  }
+
+  private closeClobSocket(): void {
+    this.clobClosedByUs = true;
+    if (this.clobReconnectTimer) {
+      clearTimeout(this.clobReconnectTimer);
+      this.clobReconnectTimer = null;
+    }
+    this.clobWs?.close();
+    this.clobWs = null;
+    this.clobAssetIds.clear();
+  }
+
+  /**
+   * Translate CLOB host messages into the same events the rest of the SDK
+   * already consumes ('orderbook', 'priceChange', 'lastTrade').
+   *
+   * Message shapes (all values are strings):
+   *   book              { market, asset_id, timestamp, hash, bids[], asks[], tick_size }
+   *   price_change      { market, timestamp, price_changes: [{ asset_id, price, size, side, best_bid, best_ask }] }
+   *   last_trade_price  { market, asset_id, price, size, side, timestamp }
+   *
+   * Note bids/asks arrive worst-price-first; they are re-sorted here to the
+   * SDK convention of best-first (bids descending, asks ascending) so
+   * consumers can rely on `asks[0]` / `bids[0]` being top-of-book.
+   */
+  private handleClobMessage(raw: unknown): void {
+    for (const msg of (Array.isArray(raw) ? raw : [raw]) as Array<Record<string, unknown>>) {
+      if (!msg || typeof msg !== 'object') continue;
+
+      switch (msg.event_type) {
+        case 'book': {
+          const book = this.buildBookFromClob(msg);
+          if (!book.tokenId) break;
+          this.bookCache.set(book.tokenId, book);
+          this.emit('orderbook', book);
+          break;
+        }
+
+        case 'price_change': {
+          const changes = (msg.price_changes ?? []) as Array<Record<string, string>>;
+          const timestamp = this.normalizeTimestamp(msg.timestamp) || Date.now();
+          const touched = new Set<string>();
+
+          for (const change of changes) {
+            const assetId = change.asset_id;
+            if (!assetId) continue;
+            touched.add(assetId);
+
+            this.applyClobPriceChange(assetId, change, timestamp);
+
+            this.emit('priceChange', {
+              assetId,
+              changes: [{ price: change.price, size: change.size }],
+              timestamp,
+            } as PriceChange);
+          }
+
+          // Re-emit the updated books so orderbook consumers see fresh
+          // top-of-book without waiting for the next full snapshot.
+          for (const assetId of touched) {
+            const book = this.bookCache.get(assetId);
+            if (book) this.emit('orderbook', book);
+          }
+          break;
+        }
+
+        case 'last_trade_price': {
+          const trade: LastTradeInfo = {
+            assetId: (msg.asset_id as string) || '',
+            price: parseFloat((msg.price as string) || '0'),
+            side: ((msg.side as string) || 'BUY') as 'BUY' | 'SELL',
+            size: parseFloat((msg.size as string) || '0'),
+            timestamp: this.normalizeTimestamp(msg.timestamp) || Date.now(),
+          };
+          if (!trade.assetId) break;
+          this.lastTradeCache.set(trade.assetId, trade);
+          this.emit('lastTrade', trade);
+          break;
+        }
+
+        default:
+          break;
+      }
+    }
+  }
+
+  private buildBookFromClob(msg: Record<string, unknown>): OrderbookSnapshot {
+    const toLevels = (raw: unknown): OrderbookLevel[] =>
+      ((raw ?? []) as Array<{ price: string; size: string }>).map(l => ({
+        price: parseFloat(l.price),
+        size: parseFloat(l.size),
+      }));
+
+    const bids = toLevels(msg.bids).sort((a, b) => b.price - a.price);
+    const asks = toLevels(msg.asks).sort((a, b) => a.price - b.price);
+    const tokenId = (msg.asset_id as string) || '';
+
+    return {
+      tokenId,
+      assetId: tokenId, // Backward compatibility
+      market: (msg.market as string) || '',
+      bids,
+      asks,
+      timestamp: this.normalizeTimestamp(msg.timestamp) || Date.now(),
+      tickSize: (msg.tick_size as string) || '0.01',
+      minOrderSize: (msg.min_order_size as string) || '1',
+      hash: (msg.hash as string) || '',
+    };
+  }
+
+  /**
+   * Apply an incremental price_change to the cached book for one asset.
+   * A size of 0 removes the level.
+   */
+  private applyClobPriceChange(
+    assetId: string,
+    change: Record<string, string>,
+    timestamp: number
+  ): void {
+    const book = this.bookCache.get(assetId);
+    if (!book) return; // No snapshot yet - wait for the initial `book` message.
+
+    const price = parseFloat(change.price);
+    const size = parseFloat(change.size);
+    if (!Number.isFinite(price)) return;
+
+    const isBid = (change.side || '').toUpperCase() === 'BUY';
+    const levels = isBid ? [...book.bids] : [...book.asks];
+    const idx = levels.findIndex(l => l.price === price);
+
+    if (!Number.isFinite(size) || size === 0) {
+      if (idx >= 0) levels.splice(idx, 1);
+    } else if (idx >= 0) {
+      levels[idx] = { price, size };
+    } else {
+      levels.push({ price, size });
+    }
+
+    levels.sort((a, b) => (isBid ? b.price - a.price : a.price - b.price));
+
+    this.bookCache.set(assetId, {
+      ...book,
+      bids: isBid ? levels : book.bids,
+      asks: isBid ? book.asks : levels,
+      timestamp,
+      hash: change.hash || book.hash,
+    });
   }
 
   private sendSubscription(msg: { subscriptions: Array<{ topic: string; type: string; filters?: string; clob_auth?: ClobApiKeyCreds }> }): void {
