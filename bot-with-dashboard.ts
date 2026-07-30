@@ -393,6 +393,14 @@ async function executeSmartMoneyCopy(sdk: PolymarketSDK, trade: SmartMoneyTrade)
     return;
   }
 
+  // Only copy meaningful whale trades. Note the subscription's `minSize`
+  // option compares SHARES, not dollars, so the value filter belongs here.
+  const whaleValue = trade.size * trade.price;
+  if (whaleValue < cfg.minTradeSize) {
+    log('INFO', `Copy skipped: whale trade $${whaleValue.toFixed(2)} below $${cfg.minTradeSize} threshold`);
+    return;
+  }
+
   // Available collateral: state.usdcEBalance holds the live pUSD balance.
   // Keep a small buffer so a partial fill or price drift can't overdraw.
   const available = Math.max(0, state.usdcEBalance * 0.98);
@@ -507,11 +515,20 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
   updateDashboard();
 
   if (qualified.length > 0) {
-    // Subscribe to smart money trades with address filter
+    // Subscribe to smart money trades with address filter.
+    //
+    // The filter options were previously omitted, so this callback received
+    // EVERY trade on Polymarket (~60/sec) rather than only the qualified
+    // wallets: the activity feed filled with strangers, and in LIVE mode the
+    // copier would have mirrored arbitrary traders with real funds.
     sdk.smartMoney.subscribeSmartMoneyTrades(
       async (trade: SmartMoneyTrade) => {
         if (!CONFIG.smartMoney.enabled) return;
         if (!canTrade()) return;
+
+        // Defence in depth: never act on a wallet we are not following, even
+        // if the upstream filter changes behaviour.
+        if (!qualified.some(w => w.toLowerCase() === trade.traderAddress?.toLowerCase())) return;
 
         // ... (inside setupSmartMoney callback)
         // Add to smart money signals for dashboard
@@ -553,7 +570,8 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
         } else {
           await executeSmartMoneyCopy(sdk, trade);
         }
-      });
+      },
+      { filterAddresses: qualified });
   }
   isSmartMoneyInitialized = true;
   isSmartMoneyInitializing = false;
