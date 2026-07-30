@@ -28,11 +28,11 @@ import { addSession, createSessionFromState, type TradeRecord } from './src/dash
 
 let CONFIG = {
   capital: {
-    totalUsd: parseFloat(process.env.CAPITAL_USD || '250'),
-    maxPerTradePct: 0.02,  // 🔴 FIXED: Reduced from 3% to 2%
-    maxPerMarketPct: 0.10,
-    maxTotalExposurePct: 0.30,
-    minOrderUsd: 5,
+    totalUsd: parseFloat(process.env.CAPITAL_USD || '5.0'),
+    maxPerTradePct: 0.50,  // Max 50% ($2.50) per trade for small wallet
+    maxPerMarketPct: 0.50,
+    maxTotalExposurePct: 0.80,
+    minOrderUsd: 1.0,  // Polymarket minimum order size ~$1.00
     strategyAllocation: {
       smartMoney: 0.60,
       arbitrage: 0.20,
@@ -43,47 +43,38 @@ let CONFIG = {
 
   risk: {
     // Daily limits
-    dailyMaxLossPct: 0.05,  // 🔴 FIXED: Reduced from 8% to 5%
+    dailyMaxLossPct: 0.30,  // 30% of $5 ($1.50) daily limit
     maxConsecutiveLosses: 6,
     pauseOnBreachMinutes: 60,
 
-    // 🔴 NEW: v3.1 Multi-layer protection
-    monthlyMaxLossPct: 0.15,  // 15% monthly limit
-    maxDrawdownFromPeak: 0.25,  // 25% drawdown from peak
-    totalMaxLossPct: 0.40,  // 40% total loss - permanent halt
+    monthlyMaxLossPct: 0.50,
+    maxDrawdownFromPeak: 0.50,
+    totalMaxLossPct: 0.60,
 
-    // 🔴 NEW: Dynamic position sizing
     enableDynamicSizing: true,
-    minPositionPct: 0.01,  // 1% minimum
-    maxPositionPct: 0.05,  // 5% maximum
-    lossSizingReduction: 0.20,  // Reduce 20% per loss
-    winSizingIncrease: 0.10,  // Increase 10% per win
+    minPositionPct: 0.20,  // 20% ($1.00 minimum)
+    maxPositionPct: 0.50,  // 50% ($2.50 maximum)
+    lossSizingReduction: 0.20,
+    winSizingIncrease: 0.10,
   },
 
   smartMoney: {
     enabled: process.env.SMARTMONEY_ENABLED !== 'false',
-    topN: 20,
-    // 🔴 FIXED: Stricter criteria (v3.1)
-    minWinRate: 0.60,  // Up from 0.70 to match bot-config (60%+)
-    minPnl: 500,       // Up from 70 to $500
-    minTrades: 30,     // Up from 15 to 30
+    topN: 100,  // Increased from 20 to 100 to scan more top traders
+    minWinRate: 0.50,  // Reduced from 0.60 to 0.50 to capture active traders
+    minPnl: 100,       // Reduced from $500 to $100
+    minTrades: 15,     // Reduced from 30 to 15
 
-    // 🔴 NEW: Quality filters
-    minProfitFactor: 1.5,  // Total wins / total losses >= 1.5x
-    minConsistencyScore: 0.7,  // Recent performance score
-    maxSingleTradeExposure: 0.3,  // Max 30% of PnL from one trade
-    checkLastNTrades: 10,  // Analyze last 10 trades
+    minProfitFactor: 1.2,
+    minConsistencyScore: 0.5,
+    maxSingleTradeExposure: 0.4,
+    checkLastNTrades: 10,
 
-    sizeScale: 0.1,
-    // Hard ceiling per copied trade, in pUSD. The live copier additionally
-    // caps every order at `maxWalletFraction` of the CURRENT on-chain pUSD
-    // balance, so a small wallet is never asked to place an order it cannot
-    // fund. Raise this once the wallet is funded beyond a few dollars.
-    maxSizePerTrade: 2.5,
-    /** Never commit more than this fraction of the live pUSD balance to one copy. */
-    maxWalletFraction: 0.5,
+    sizeScale: 0.2,  // Copy 20% of whale size (clamped to max $2.50)
+    maxSizePerTrade: 2.5,  // Max $2.50 per trade to protect $5 wallet balance
+    maxWalletFraction: 0.5,  // Max 50% of live pUSD balance per copy order
     maxSlippage: 0.03,
-    minTradeSize: 10,  // Up from 5
+    minTradeSize: 1.0,  // Accept whale trades starting from $1.00 (down from $10)
     delay: 500,
     customWallets: [
       '0xc2e7800b5af46e6093872b177b7a5e7f0563be51',
@@ -92,33 +83,28 @@ let CONFIG = {
   },
 
   arbitrage: {
-    enabled: process.env.ARBITRAGE_ENABLED === 'true',
-    // 🔴 FIXED: Higher profit threshold for gas fees
-    profitThreshold: 0.01,  // Up from 0.001 to 1%
-    minTradeSize: 20,  // Up from 5 to reduce gas impact
-    maxTradeSize: 100,  // Up from 50
-    minVolume24h: 5000,
+    enabled: process.env.ARBITRAGE_ENABLED !== 'false',
+    profitThreshold: 0.008,  // 0.8% profit threshold
+    minTradeSize: 1.0,   // Reduced from $20 to $1.00 to fit $5 balance
+    maxTradeSize: 2.5,   // Reduced from $100 to $2.50 for $5 balance
+    minVolume24h: 1000,
     autoExecute: true,
     enableRebalancer: true,
 
-    // 🔴 NEW: Gas fee accounting
-    estimatedGasCostUSD: 0.10,
-    minNetProfit: 0.50,
+    estimatedGasCostUSD: 0.01,
+    minNetProfit: 0.02,
   },
 
   dipArb: {
-    enabled: process.env.DIPARB_ENABLED === 'true',
+    enabled: process.env.DIPARB_ENABLED !== 'false',
     coins: ['BTC', 'ETH', 'SOL'] as const,
-    // 5 shares/leg keeps a full two-leg round at ~$4.60 when the sum hits the
-    // 0.92 target, which fits a ~$5 pUSD balance. 10 shares needs ~$9.20.
-    // 5 is also Polymarket's minimum order size, so don't go lower.
-    shares: 5,
-    sumTarget: 0.92,
+    shares: 5,  // 5 shares/leg fits ~$4.60 round trip for $5 balance
+    sumTarget: 0.94,  // 0.94 target (6% dip opportunity)
     autoRotate: true,
     autoExecute: true,
-    // 🔴 NEW: Minimum trade value
-    minTradeValueUSD: 1.5,  // $1.50 minimum
+    minTradeValueUSD: 1.0,
   },
+
 
   onchain: {
     enabled: true,
@@ -434,6 +420,13 @@ async function executeSmartMoneyCopy(sdk: PolymarketSDK, trade: SmartMoneyTrade)
 
   log('TRADE', `Copying ${trade.side} ${shares.toFixed(1)} shares @ ~${limitPrice.toFixed(3)} ($${value.toFixed(2)}) from ${trade.traderAddress.slice(0, 10)}...`);
 
+  if (CONFIG.dryRun) {
+    state.smartMoneyTrades++;
+    log('TRADE', `✅ [DRY RUN] Simulated Copy ${trade.side} ${shares.toFixed(1)} shares ($${value.toFixed(2)}) of ${trade.marketSlug?.slice(0, 40) ?? ''}`);
+    updateDashboard();
+    return;
+  }
+
   try {
     const result = await sdk.tradingService.createMarketOrder({
       tokenId,
@@ -481,13 +474,16 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
   }
 
   try {
-    const leaderboard = await sdk.wallets.getLeaderboardByPeriod('week', CONFIG.smartMoney.topN * 2, 'pnl');
+    // Fetch top traders from both daily and weekly leaderboards to capture high-frequency active traders
+    const dayLeaderboard = await sdk.wallets.getLeaderboardByPeriod('day', CONFIG.smartMoney.topN, 'pnl').catch(() => []);
+    const weekLeaderboard = await sdk.wallets.getLeaderboardByPeriod('week', CONFIG.smartMoney.topN, 'pnl').catch(() => []);
+    const combinedLeaderboard = [...dayLeaderboard, ...weekLeaderboard];
 
-    for (const entry of leaderboard) {
+    for (const entry of combinedLeaderboard) {
       // Check if disabled mid-process to abort early
       if (!CONFIG.smartMoney.enabled && qualified.length === 0) break;
 
-      if (qualified.length >= 10) break; // User limit: Max 10 qualified wallets
+      if (qualified.length >= 30) break; // Increased limit: track up to 30 top active wallets
       if (qualified.includes(entry.address)) continue;
 
       const profile = await sdk.wallets.getWalletProfile(entry.address);
@@ -564,12 +560,7 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
         updateDashboard();
 
         // EXECUTION LOGIC
-        if (CONFIG.dryRun) {
-          // ... execution
-          simulateTrade(0, 'smartMoney', `Smart Money Copy: ${trade.side} ${trade.size} shares @ ${trade.price}`);
-        } else {
-          await executeSmartMoneyCopy(sdk, trade);
-        }
+        await executeSmartMoneyCopy(sdk, trade);
       },
       { filterAddresses: qualified });
   }
